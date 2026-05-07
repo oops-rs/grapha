@@ -1,6 +1,6 @@
 [package]
 name = "grapha"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Blazingly fast code intelligence CLI and MCP server for Swift, Rust, and best-effort tree-sitter languages"
 license = "MIT"
@@ -11,8 +11,8 @@ keywords = ["code-intelligence", "mcp", "analysis", "swift", "rust"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-grapha-core = { version = "0.4.0", path = "../grapha-core" }
-grapha-swift = { version = "0.4.0", path = "../grapha-swift" }
+grapha-core = { version = "0.4.1", path = "../grapha-core" }
+grapha-swift = { version = "0.4.1", path = "../grapha-swift" }
 anyhow = "1"
 bincode = { version = "2", features = ["serde"] }
 notify = "8.2"
