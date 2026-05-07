@@ -1,7 +1,8 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use regex::Regex;
 use tree_sitter::{Parser, Tree};
 
 use grapha_core::graph::{Edge, EdgeKind, Node, NodeKind, NodeRole, Visibility};
@@ -35,11 +36,298 @@ impl LanguageExtractor for SwiftExtractor {
 
         let mut result = ExtractionResult::new();
         let file_str = file_path.to_string_lossy().to_string();
+        let file_node_id = format!("file:{file_str}");
 
+        push_file_node(
+            &mut result,
+            tree.root_node(),
+            file_path,
+            &file_str,
+            &file_node_id,
+        );
         walk_node(tree.root_node(), source, &file_str, &[], None, &mut result);
+        extract_swift_framework_nodes(&mut result, source, &file_str);
+        emit_file_contains_edges(&mut result, &file_str, &file_node_id);
 
         Ok(result)
     }
+}
+
+pub fn enrich_codegraph_compat_with_tree(
+    source: &[u8],
+    file_path: &Path,
+    tree: &Tree,
+    result: &mut ExtractionResult,
+) -> anyhow::Result<()> {
+    let file_str = file_path.to_string_lossy().to_string();
+    let file_node_id = format!("file:{file_str}");
+
+    if !result.nodes.iter().any(|node| node.id == file_node_id) {
+        push_file_node(
+            result,
+            tree.root_node(),
+            file_path,
+            &file_str,
+            &file_node_id,
+        );
+    }
+    extract_import_nodes_from_tree(tree.root_node(), source, &file_str, result);
+    extract_swift_framework_nodes(result, source, &file_str);
+    emit_file_contains_edges(result, &file_str, &file_node_id);
+
+    Ok(())
+}
+
+fn push_file_node(
+    result: &mut ExtractionResult,
+    root: tree_sitter::Node,
+    file_path: &Path,
+    file: &str,
+    file_node_id: &str,
+) {
+    let name = file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(file)
+        .to_string();
+    let mut metadata = HashMap::new();
+    metadata.insert("language".to_string(), "swift".to_string());
+
+    result.nodes.push(Node {
+        id: file_node_id.to_string(),
+        kind: NodeKind::File,
+        name,
+        file: file.into(),
+        span: make_span(root),
+        visibility: Visibility::Private,
+        metadata,
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
+        snippet: None,
+        repo: None,
+    });
+}
+
+fn emit_file_contains_edges(result: &mut ExtractionResult, file: &str, file_node_id: &str) {
+    let contained: HashSet<String> = result
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Contains)
+        .map(|edge| edge.target.clone())
+        .collect();
+    let top_level = result
+        .nodes
+        .iter()
+        .filter(|node| node.id != file_node_id && !contained.contains(&node.id))
+        .map(|node| (node.id.clone(), node.span.clone()))
+        .collect::<Vec<_>>();
+
+    for (target, span) in top_level {
+        result.edges.push(Edge {
+            source: file_node_id.to_string(),
+            target,
+            kind: EdgeKind::Contains,
+            confidence: 1.0,
+            direction: None,
+            operation: None,
+            condition: None,
+            async_boundary: None,
+            provenance: edge_provenance(file, span, file_node_id),
+            repo: None,
+        });
+    }
+}
+
+fn extract_swift_framework_nodes(result: &mut ExtractionResult, source: &[u8], file: &str) {
+    let Ok(content) = std::str::from_utf8(source) else {
+        return;
+    };
+
+    let view_re = Regex::new(r#"struct\s+(\w+)\s*:\s*(?:\w+\s*,\s*)*View"#)
+        .expect("SwiftUI component regex should compile");
+    for capture in view_re.captures_iter(content) {
+        let Some(full_match) = capture.get(0) else {
+            continue;
+        };
+        let Some(name) = capture.get(1).map(|m| m.as_str()) else {
+            continue;
+        };
+        push_framework_node(
+            result,
+            file,
+            source,
+            NodeKind::Component,
+            "component",
+            name,
+            full_match.start(),
+            full_match.end(),
+            framework_metadata("component", None, None),
+        );
+    }
+
+    let route_re = Regex::new(r#"\.(get|post|put|patch|delete)\s*\(\s*["']([^"']+)["']"#)
+        .expect("Swift route regex should compile");
+    for capture in route_re.captures_iter(content) {
+        let Some(full_match) = capture.get(0) else {
+            continue;
+        };
+        let method = capture.get(1).map(|m| m.as_str()).unwrap_or_default();
+        let path = capture.get(2).map(|m| m.as_str()).unwrap_or_default();
+        push_swift_route_node(
+            result,
+            file,
+            source,
+            method,
+            path,
+            full_match.start(),
+            full_match.end(),
+        );
+    }
+
+    let grouped_re = Regex::new(
+        r#"\.grouped\s*\(\s*["']([^"']+)["']\s*\)\s*\.(get|post|put|patch|delete)\s*\(\s*["']([^"']+)["']"#,
+    )
+    .expect("Swift grouped route regex should compile");
+    for capture in grouped_re.captures_iter(content) {
+        let Some(full_match) = capture.get(0) else {
+            continue;
+        };
+        let prefix = capture.get(1).map(|m| m.as_str()).unwrap_or_default();
+        let method = capture.get(2).map(|m| m.as_str()).unwrap_or_default();
+        let path = capture.get(3).map(|m| m.as_str()).unwrap_or_default();
+        let full_path = format!("{}/{}", prefix.trim_matches('/'), path.trim_matches('/'));
+        push_swift_route_node(
+            result,
+            file,
+            source,
+            method,
+            &format!("/{full_path}"),
+            full_match.start(),
+            full_match.end(),
+        );
+    }
+}
+
+fn extract_import_nodes_from_tree(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    result: &mut ExtractionResult,
+) {
+    if node.kind() == "import_declaration" {
+        extract_import(node, source, file, result);
+        return;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        extract_import_nodes_from_tree(child, source, file, result);
+    }
+}
+
+fn push_swift_route_node(
+    result: &mut ExtractionResult,
+    file: &str,
+    source: &[u8],
+    method: &str,
+    path: &str,
+    start_byte: usize,
+    end_byte: usize,
+) {
+    if method.is_empty() || path.is_empty() {
+        return;
+    }
+    let method = method.to_ascii_uppercase();
+    let name = format!("{method} {path}");
+    push_framework_node(
+        result,
+        file,
+        source,
+        NodeKind::Route,
+        "route",
+        &name,
+        start_byte,
+        end_byte,
+        framework_metadata("route", Some(&method), Some(path)),
+    );
+}
+
+fn push_framework_node(
+    result: &mut ExtractionResult,
+    file: &str,
+    source: &[u8],
+    kind: NodeKind,
+    id_prefix: &str,
+    name: &str,
+    start_byte: usize,
+    end_byte: usize,
+    mut metadata: HashMap<String, String>,
+) {
+    let span = span_from_byte_range(source, start_byte, end_byte);
+    let line = span.start[0] + 1;
+    let id = format!("{id_prefix}:{file}:{name}:{line}");
+    if result.nodes.iter().any(|node| node.id == id) {
+        return;
+    }
+    metadata.insert("language".to_string(), "swift".to_string());
+    result.nodes.push(Node {
+        id,
+        kind,
+        name: name.to_string(),
+        file: file.into(),
+        span,
+        visibility: Visibility::Public,
+        metadata,
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
+        snippet: None,
+        repo: None,
+    });
+}
+
+fn framework_metadata(
+    kind: &str,
+    method: Option<&str>,
+    path: Option<&str>,
+) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    metadata.insert("framework.kind".to_string(), kind.to_string());
+    if let Some(method) = method {
+        metadata.insert("route.method".to_string(), method.to_string());
+    }
+    if let Some(path) = path {
+        metadata.insert("route.path".to_string(), path.to_string());
+    }
+    metadata
+}
+
+fn span_from_byte_range(
+    source: &[u8],
+    start_byte: usize,
+    end_byte: usize,
+) -> grapha_core::graph::Span {
+    grapha_core::graph::Span {
+        start: point_for_byte(source, start_byte),
+        end: point_for_byte(source, end_byte),
+    }
+}
+
+fn point_for_byte(source: &[u8], target: usize) -> [usize; 2] {
+    let mut row = 0usize;
+    let mut column = 0usize;
+    for byte in source.iter().take(target.min(source.len())) {
+        if *byte == b'\n' {
+            row += 1;
+            column = 0;
+        } else {
+            column += 1;
+        }
+    }
+    [row, column]
 }
 
 fn walk_node(
@@ -866,6 +1154,11 @@ fn extract_import(
     file: &str,
     result: &mut ExtractionResult,
 ) {
+    let signature = node
+        .utf8_text(source)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     // The import path is in the identifier > simple_identifier child
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -873,12 +1166,19 @@ fn extract_import(
             && let Ok(path_text) = child.utf8_text(source)
         {
             let path = path_text.to_string();
+            if !push_import_node(result, file, node, &path, &signature) {
+                continue;
+            }
 
-            result.imports.push(grapha_core::resolve::Import {
-                path: path.clone(),
-                symbols: vec![],
-                kind: grapha_core::resolve::ImportKind::Module,
-            });
+            if !result.imports.iter().any(|import| {
+                import.path == path && import.kind == grapha_core::resolve::ImportKind::Module
+            }) {
+                result.imports.push(grapha_core::resolve::Import {
+                    path: path.clone(),
+                    symbols: vec![],
+                    kind: grapha_core::resolve::ImportKind::Module,
+                });
+            }
 
             result.edges.push(Edge {
                 source: file.to_string(),
@@ -894,6 +1194,53 @@ fn extract_import(
             });
         }
     }
+}
+
+fn push_import_node(
+    result: &mut ExtractionResult,
+    file: &str,
+    node: tree_sitter::Node,
+    path: &str,
+    signature: &str,
+) -> bool {
+    if result.nodes.iter().any(|node| {
+        node.kind == NodeKind::Import && node.file == Path::new(file) && node.name == path
+    }) {
+        return false;
+    }
+    let id = unique_decl_id(result, make_id(file, &[], &format!("import:{path}")), node);
+    let mut metadata = HashMap::new();
+    metadata.insert("language".to_string(), "swift".to_string());
+
+    result.nodes.push(Node {
+        id: id.clone(),
+        kind: NodeKind::Import,
+        name: path.to_string(),
+        file: file.into(),
+        span: make_span(node),
+        visibility: Visibility::Private,
+        metadata,
+        role: None,
+        signature: Some(signature.to_string()),
+        doc_comment: None,
+        module: None,
+        snippet: None,
+        repo: None,
+    });
+    let file_node_id = format!("file:{file}");
+    result.edges.push(Edge {
+        source: file_node_id.clone(),
+        target: id,
+        kind: EdgeKind::Imports,
+        confidence: 0.9,
+        direction: None,
+        operation: None,
+        condition: None,
+        async_boundary: None,
+        provenance: node_edge_provenance(file, node, &file_node_id),
+        repo: None,
+    });
+    true
 }
 
 /// Extract function signature (text up to opening `{`).

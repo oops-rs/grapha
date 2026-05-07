@@ -1,7 +1,8 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use regex::Regex;
 use tree_sitter::Parser;
 
 use grapha_core::graph::{
@@ -30,11 +31,193 @@ impl LanguageExtractor for RustExtractor {
 
         let mut result = ExtractionResult::new();
         let file_str = file_path.to_string_lossy().to_string();
+        let file_node_id = format!("file:{file_str}");
 
+        push_file_node(
+            &mut result,
+            tree.root_node(),
+            file_path,
+            &file_str,
+            &file_node_id,
+        );
         walk_node(tree.root_node(), source, &file_str, &[], None, &mut result);
+        extract_rust_framework_nodes(&mut result, source, &file_str);
+        emit_file_contains_edges(&mut result, &file_str, &file_node_id);
 
         Ok(result)
     }
+}
+
+fn push_file_node(
+    result: &mut ExtractionResult,
+    root: tree_sitter::Node,
+    file_path: &Path,
+    file: &str,
+    file_node_id: &str,
+) {
+    let name = file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(file)
+        .to_string();
+    let start = root.start_position();
+    let end = root.end_position();
+    let mut metadata = HashMap::new();
+    metadata.insert("language".to_string(), "rust".to_string());
+
+    result.nodes.push(Node {
+        id: file_node_id.to_string(),
+        kind: NodeKind::File,
+        name,
+        file: file.into(),
+        span: Span {
+            start: [start.row, start.column],
+            end: [end.row, end.column],
+        },
+        visibility: Visibility::Private,
+        metadata,
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
+        snippet: None,
+        repo: None,
+    });
+}
+
+fn emit_file_contains_edges(result: &mut ExtractionResult, file: &str, file_node_id: &str) {
+    let contained: HashSet<String> = result
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Contains)
+        .map(|edge| edge.target.clone())
+        .collect();
+    let top_level = result
+        .nodes
+        .iter()
+        .filter(|node| node.id != file_node_id && !contained.contains(&node.id))
+        .map(|node| (node.id.clone(), node.span.clone()))
+        .collect::<Vec<_>>();
+
+    for (target, span) in top_level {
+        result.edges.push(Edge {
+            source: file_node_id.to_string(),
+            target,
+            kind: EdgeKind::Contains,
+            confidence: 1.0,
+            direction: None,
+            operation: None,
+            condition: None,
+            async_boundary: None,
+            provenance: vec![EdgeProvenance {
+                file: file.into(),
+                span,
+                symbol_id: file_node_id.to_string(),
+            }],
+            repo: None,
+        });
+    }
+}
+
+fn extract_rust_framework_nodes(result: &mut ExtractionResult, source: &[u8], file: &str) {
+    let Ok(content) = std::str::from_utf8(source) else {
+        return;
+    };
+    for pattern in [
+        r#"#\[(get|post|put|patch|delete|head|options)\s*\(\s*["']([^"']+)["']"#,
+        r#"\.route\s*\(\s*["']([^"']+)["']\s*,\s*(get|post|put|patch|delete|head|options)"#,
+    ] {
+        let re = Regex::new(pattern).expect("Rust route regex should compile");
+        for capture in re.captures_iter(content) {
+            let Some(full_match) = capture.get(0) else {
+                continue;
+            };
+            let (method, path) = if pattern.starts_with("#") {
+                (
+                    capture.get(1).map(|m| m.as_str()).unwrap_or_default(),
+                    capture.get(2).map(|m| m.as_str()).unwrap_or_default(),
+                )
+            } else {
+                (
+                    capture.get(2).map(|m| m.as_str()).unwrap_or_default(),
+                    capture.get(1).map(|m| m.as_str()).unwrap_or_default(),
+                )
+            };
+            push_route_node(
+                result,
+                file,
+                source,
+                method,
+                path,
+                full_match.start(),
+                full_match.end(),
+            );
+        }
+    }
+}
+
+fn push_route_node(
+    result: &mut ExtractionResult,
+    file: &str,
+    source: &[u8],
+    method: &str,
+    path: &str,
+    start_byte: usize,
+    end_byte: usize,
+) {
+    if method.is_empty() || path.is_empty() {
+        return;
+    }
+    let method = method.to_ascii_uppercase();
+    let name = format!("{method} {path}");
+    let span = span_from_byte_range(source, start_byte, end_byte);
+    let line = span.start[0] + 1;
+    let id = format!("route:{file}:{method}:{path}:{line}");
+    if result.nodes.iter().any(|node| node.id == id) {
+        return;
+    }
+    let mut metadata = HashMap::new();
+    metadata.insert("language".to_string(), "rust".to_string());
+    metadata.insert("framework.kind".to_string(), "route".to_string());
+    metadata.insert("route.method".to_string(), method);
+    metadata.insert("route.path".to_string(), path.to_string());
+
+    result.nodes.push(Node {
+        id,
+        kind: NodeKind::Route,
+        name,
+        file: file.into(),
+        span,
+        visibility: Visibility::Public,
+        metadata,
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
+        snippet: None,
+        repo: None,
+    });
+}
+
+fn span_from_byte_range(source: &[u8], start_byte: usize, end_byte: usize) -> Span {
+    Span {
+        start: point_for_byte(source, start_byte),
+        end: point_for_byte(source, end_byte),
+    }
+}
+
+fn point_for_byte(source: &[u8], target: usize) -> [usize; 2] {
+    let mut row = 0usize;
+    let mut column = 0usize;
+    for byte in source.iter().take(target.min(source.len())) {
+        if *byte == b'\n' {
+            row += 1;
+            column = 0;
+        } else {
+            column += 1;
+        }
+    }
+    [row, column]
 }
 
 fn edge_provenance(file: &str, node: tree_sitter::Node, symbol_id: &str) -> Vec<EdgeProvenance> {
@@ -110,6 +293,34 @@ fn walk_node(
         "const_item" | "static_item" => {
             if let Some(graph_node) =
                 extract_constant(node, source, file, module_path, parent_id, result)
+            {
+                if let Some(pid) = parent_id {
+                    result.edges.push(Edge {
+                        source: pid.to_string(),
+                        target: graph_node.id.clone(),
+                        kind: EdgeKind::Contains,
+                        confidence: 1.0,
+                        direction: None,
+                        operation: None,
+                        condition: None,
+                        async_boundary: None,
+                        provenance: edge_provenance(file, node, pid),
+                        repo: None,
+                    });
+                }
+                let node_id = graph_node.id.clone();
+                result.nodes.push(graph_node);
+
+                if let Some(type_node) = node.child_by_field_name("type")
+                    && let Ok(type_name) = type_node.utf8_text(source)
+                {
+                    push_type_ref_edges(result, file, type_node, &node_id, module_path, type_name);
+                }
+            }
+        }
+        "let_declaration" => {
+            if let Some(graph_node) =
+                extract_variable(node, source, file, module_path, parent_id, result)
             {
                 if let Some(pid) = parent_id {
                     result.edges.push(Edge {
@@ -416,10 +627,12 @@ fn walk_node(
                 };
 
                 result.imports.push(grapha_core::resolve::Import {
-                    path,
+                    path: path.clone(),
                     symbols,
                     kind,
                 });
+
+                push_import_node(result, file, node, &path, use_text);
 
                 // Keep the Uses edge for backwards compatibility
                 result.edges.push(Edge {
@@ -492,6 +705,52 @@ fn unique_decl_id(
         "{proposed_id}@{}:{}:{}:{}",
         start.row, start.column, end.row, end.column
     )
+}
+
+fn push_import_node(
+    result: &mut ExtractionResult,
+    file: &str,
+    node: tree_sitter::Node,
+    path: &str,
+    signature: &str,
+) {
+    let proposed_id = make_id(file, &[], &format!("import:{path}"));
+    let id = unique_decl_id(result, proposed_id, node);
+    let start = node.start_position();
+    let end = node.end_position();
+    let mut metadata = HashMap::new();
+    metadata.insert("language".to_string(), "rust".to_string());
+
+    result.nodes.push(Node {
+        id: id.clone(),
+        kind: NodeKind::Import,
+        name: path.to_string(),
+        file: file.into(),
+        span: Span {
+            start: [start.row, start.column],
+            end: [end.row, end.column],
+        },
+        visibility: Visibility::Private,
+        metadata,
+        role: None,
+        signature: Some(signature.trim().to_string()),
+        doc_comment: None,
+        module: None,
+        snippet: None,
+        repo: None,
+    });
+    result.edges.push(Edge {
+        source: format!("file:{file}"),
+        target: id,
+        kind: EdgeKind::Imports,
+        confidence: 0.9,
+        direction: None,
+        operation: None,
+        condition: None,
+        async_boundary: None,
+        provenance: edge_provenance(file, node, &format!("file:{file}")),
+        repo: None,
+    });
 }
 
 fn qualify_reference_target(file: &str, module_path: &[String], target: &str) -> String {
@@ -648,6 +907,23 @@ fn primary_symbol_path(raw: &str) -> Option<String> {
 
 fn terminal_symbol_name(path: &str) -> &str {
     path.rsplit("::").next().unwrap_or(path)
+}
+
+fn first_identifier_text(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    if matches!(
+        node.kind(),
+        "identifier" | "field_identifier" | "type_identifier"
+    ) {
+        return node.utf8_text(source).ok().map(ToString::to_string);
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(name) = first_identifier_text(child, source) {
+            return Some(name);
+        }
+    }
+    None
 }
 
 /// Extract the text of a named child field.
@@ -1091,6 +1367,54 @@ fn extract_constant(
     })
 }
 
+fn extract_variable(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    parent_id: Option<&str>,
+    result: &ExtractionResult,
+) -> Option<Node> {
+    let pattern = node
+        .child_by_field_name("pattern")
+        .or_else(|| node.child_by_field_name("name"))
+        .unwrap_or(node);
+    let name = first_identifier_text(pattern, source)?;
+    if name == "_" {
+        return None;
+    }
+    let id = unique_decl_id(
+        result,
+        make_decl_id(file, module_path, parent_id, &name),
+        node,
+    );
+    let start = node.start_position();
+    let end = node.end_position();
+    let mut metadata = HashMap::new();
+    if node.utf8_text(source).is_ok_and(|raw| raw.contains("mut ")) {
+        metadata.insert("mutable".to_string(), "true".to_string());
+    }
+
+    Some(Node {
+        id,
+        kind: NodeKind::Variable,
+        name,
+        file: file.into(),
+        span: Span {
+            start: [start.row, start.column],
+            end: [end.row, end.column],
+        },
+        visibility: Visibility::Private,
+        metadata,
+        role: None,
+        signature: extract_decl_signature(node, source),
+        doc_comment: extract_doc_comment(node, source),
+        module: None,
+        snippet: None,
+        repo: None,
+    })
+}
+
 fn extract_type_alias(
     node: tree_sitter::Node,
     source: &[u8],
@@ -1519,6 +1843,74 @@ mod tests {
         let node = find_node(&result, "greet");
         assert_eq!(node.kind, NodeKind::Function);
         assert_eq!(node.visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn extracts_file_import_and_variable_nodes() {
+        let result = extract(
+            r#"
+            use std::fmt;
+
+            fn main() {
+                let mut count: usize = 1;
+            }
+            "#,
+        );
+
+        let file = find_node(&result, "test.rs");
+        assert_eq!(file.kind, NodeKind::File);
+
+        let import = find_node(&result, "std::fmt");
+        assert_eq!(import.kind, NodeKind::Import);
+        assert_eq!(import.signature.as_deref(), Some("use std::fmt;"));
+
+        let main = find_node(&result, "main");
+        let count = find_node(&result, "count");
+        assert_eq!(count.kind, NodeKind::Variable);
+        assert_eq!(
+            count.metadata.get("mutable").map(String::as_str),
+            Some("true")
+        );
+
+        assert!(has_edge(&result, &file.id, &import.id, EdgeKind::Contains));
+        assert!(has_edge(&result, &file.id, &import.id, EdgeKind::Imports));
+        assert!(has_edge(&result, &file.id, &main.id, EdgeKind::Contains));
+        assert!(has_edge(&result, &main.id, &count.id, EdgeKind::Contains));
+    }
+
+    #[test]
+    fn extracts_framework_route_nodes() {
+        let result = extract(
+            r#"
+            use axum::{routing::get, Router};
+
+            #[get("/health")]
+            async fn health() {}
+
+            fn router() -> Router {
+                Router::new().route("/users", get(health))
+            }
+            "#,
+        );
+
+        let file = find_node(&result, "test.rs");
+        let health_route = find_node(&result, "GET /health");
+        let users_route = find_node(&result, "GET /users");
+
+        assert_eq!(health_route.kind, NodeKind::Route);
+        assert_eq!(users_route.kind, NodeKind::Route);
+        assert!(has_edge(
+            &result,
+            &file.id,
+            &health_route.id,
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(
+            &result,
+            &file.id,
+            &users_route.id,
+            EdgeKind::Contains
+        ));
     }
 
     #[test]

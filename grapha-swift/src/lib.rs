@@ -500,7 +500,11 @@ where
             let has_l10n = has_swiftui || source_contains_l10n_markers(source);
             let has_assets = source_contains_asset_markers(source);
             let needs_doc = result.nodes.iter().any(|n| n.doc_comment.is_none());
-            let needs_parse = needs_doc || has_swiftui || has_l10n || has_assets;
+            let needs_compat = !result
+                .nodes
+                .iter()
+                .any(|node| node.kind == grapha_core::graph::NodeKind::File);
+            let needs_parse = needs_compat || needs_doc || has_swiftui || has_l10n || has_assets;
 
             if needs_parse {
                 let t_parse = Instant::now();
@@ -509,6 +513,15 @@ where
                     .fetch_add(t_parse.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
                 if let Ok(tree) = tree_result {
+                    if needs_compat {
+                        let _ = treesitter::enrich_codegraph_compat_with_tree(
+                            source,
+                            file_path,
+                            &tree,
+                            &mut result,
+                        );
+                    }
+
                     if needs_doc {
                         let t_doc = Instant::now();
                         let _ =
@@ -566,6 +579,12 @@ where
         TIMING_TS_PARSE_NS.fetch_add(t_parse.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if let Ok(tree) = tree_result {
             let t_enrich = Instant::now();
+            let _ = treesitter::enrich_codegraph_compat_with_tree(
+                source,
+                file_path,
+                &tree,
+                &mut result,
+            );
             let _ = treesitter::enrich_doc_comments_with_tree(source, &tree, &mut result);
             let _ = treesitter::enrich_swiftui_structure_with_tree(
                 source,

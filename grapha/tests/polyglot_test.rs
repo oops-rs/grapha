@@ -148,11 +148,15 @@ fn analyzes_typescript_with_codegraph_style_constructs() {
               find(id: string): User;
             }
 
+            import { User } from "./models";
+
             export class PaymentService {
               async charge(amount: number): number {
                 return processPayment(amount);
               }
             }
+
+            router.get("/pay", processPayment);
 
             export function processPayment(amount: number): number {
               return amount;
@@ -165,19 +169,46 @@ fn analyzes_typescript_with_codegraph_style_constructs() {
             function getUser(): string {
               return "wendell";
             }
+
+            let cache = 1;
         "#,
     )
     .unwrap();
 
     let graph = analyze(dir.path());
 
+    assert!(has_node(&graph, "service.ts", "file"));
+    assert!(has_node(&graph, "./models", "import"));
     assert!(has_node(&graph, "UserRepo", "trait"));
     assert!(has_node(&graph, "PaymentService", "class"));
     assert!(has_node(&graph, "charge", "function"));
     assert!(has_node(&graph, "processPayment", "function"));
     assert!(has_node(&graph, "useAuth", "function"));
+    assert!(has_node(&graph, "cache", "variable"));
+    assert!(has_node(&graph, "GET /pay", "route"));
     assert!(has_call(&graph, "charge", "processPayment"));
     assert!(has_call(&graph, "useAuth", "getUser"));
+}
+
+#[test]
+fn extracts_react_component_and_next_route_nodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let pages = dir.path().join("pages");
+    std::fs::create_dir_all(&pages).unwrap();
+    std::fs::write(
+        pages.join("dashboard.tsx"),
+        r#"
+            export default function Dashboard() {
+              return <main />;
+            }
+        "#,
+    )
+    .unwrap();
+
+    let graph = analyze(dir.path());
+
+    assert!(has_node(&graph, "Dashboard", "component"));
+    assert!(has_node(&graph, "/dashboard", "route"));
 }
 
 #[test]

@@ -118,19 +118,20 @@ pub(crate) fn is_swiftui_invalidation_source(node: &Node) -> bool {
 
 fn kind_preference(kind: NodeKind) -> usize {
     match kind {
-        NodeKind::Function => 0,
-        NodeKind::Property => 1,
-        NodeKind::Variant | NodeKind::Field => 2,
+        NodeKind::Function | NodeKind::Method | NodeKind::Route => 0,
+        NodeKind::Property | NodeKind::Variable | NodeKind::Component => 1,
+        NodeKind::Variant | NodeKind::EnumMember | NodeKind::Field | NodeKind::Parameter => 2,
         NodeKind::Class
         | NodeKind::Struct
         | NodeKind::Enum
         | NodeKind::Trait
         | NodeKind::Module
+        | NodeKind::Namespace
         | NodeKind::Constant
         | NodeKind::TypeAlias
         | NodeKind::Protocol => 3,
-        NodeKind::Impl | NodeKind::Extension => 4,
-        NodeKind::View | NodeKind::Branch => 5,
+        NodeKind::Impl | NodeKind::Extension | NodeKind::Import | NodeKind::Export => 4,
+        NodeKind::File | NodeKind::View | NodeKind::Branch => 5,
     }
 }
 

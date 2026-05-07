@@ -14,6 +14,7 @@ categories = ["development-tools", "parser-implementations"]
 [dependencies]
 grapha-core = { version = "0.4.0", path = "../grapha-core" }
 anyhow = "1"
+regex = "1"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 toml = "1"

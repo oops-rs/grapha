@@ -790,6 +790,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "ignore",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
@@ -803,6 +804,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "grapha-core",
+ "regex",
  "tempfile",
  "toml",
  "tree-sitter",

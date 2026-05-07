@@ -5,18 +5,28 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
+    File,
     Function,
+    Method,
     Class,
     Struct,
     Enum,
+    EnumMember,
     Trait,
     Impl,
     Module,
+    Namespace,
     Field,
     Variant,
     Property,
+    Variable,
     Constant,
     TypeAlias,
+    Parameter,
+    Import,
+    Export,
+    Route,
+    Component,
     Protocol,  // Swift protocols
     Extension, // Swift extensions
     View,      // Synthetic SwiftUI view tree node
@@ -28,10 +38,19 @@ pub enum NodeKind {
 pub enum EdgeKind {
     Calls,
     Uses,
+    Imports,
+    Exports,
     Implements,
     Contains,
     TypeRef,
+    References,
+    TypeOf,
+    Returns,
     Inherits,
+    Extends,
+    Instantiates,
+    Overrides,
+    Decorates,
     Reads,
     Writes,
     Publishes,
@@ -173,6 +192,12 @@ mod tests {
     fn edge_kind_serializes_as_snake_case() {
         let json = serde_json::to_string(&EdgeKind::TypeRef).unwrap();
         assert_eq!(json, "\"type_ref\"");
+
+        let json = serde_json::to_string(&EdgeKind::TypeOf).unwrap();
+        assert_eq!(json, "\"type_of\"");
+
+        let json = serde_json::to_string(&EdgeKind::Imports).unwrap();
+        assert_eq!(json, "\"imports\"");
     }
 
     #[test]
@@ -220,9 +245,26 @@ mod tests {
 
     #[test]
     fn new_node_kinds_serialize_correctly() {
+        assert_eq!(serde_json::to_string(&NodeKind::File).unwrap(), "\"file\"");
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Method).unwrap(),
+            "\"method\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeKind::EnumMember).unwrap(),
+            "\"enum_member\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Namespace).unwrap(),
+            "\"namespace\""
+        );
         assert_eq!(
             serde_json::to_string(&NodeKind::Property).unwrap(),
             "\"property\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Variable).unwrap(),
+            "\"variable\""
         );
         assert_eq!(
             serde_json::to_string(&NodeKind::Constant).unwrap(),
@@ -231,6 +273,26 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&NodeKind::TypeAlias).unwrap(),
             "\"type_alias\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Parameter).unwrap(),
+            "\"parameter\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Import).unwrap(),
+            "\"import\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Export).unwrap(),
+            "\"export\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Route).unwrap(),
+            "\"route\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Component).unwrap(),
+            "\"component\""
         );
         assert_eq!(
             serde_json::to_string(&NodeKind::Protocol).unwrap(),

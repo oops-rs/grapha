@@ -101,15 +101,25 @@ pub fn group(graph: &Graph) -> GroupedGraph {
                             });
                         member_entries.push(sort_key);
                     }
-                    EdgeKind::Calls => calls.push(target_name.to_string()),
-                    EdgeKind::Implements => implements.push(target_name.to_string()),
-                    EdgeKind::Inherits => inherits.push(target_name.to_string()),
-                    EdgeKind::TypeRef => type_refs.push(target_name.to_string()),
+                    EdgeKind::Calls | EdgeKind::Instantiates => calls.push(target_name.to_string()),
+                    EdgeKind::Implements | EdgeKind::Overrides => {
+                        implements.push(target_name.to_string())
+                    }
+                    EdgeKind::Inherits | EdgeKind::Extends => {
+                        inherits.push(target_name.to_string())
+                    }
+                    EdgeKind::TypeRef
+                    | EdgeKind::References
+                    | EdgeKind::TypeOf
+                    | EdgeKind::Returns => type_refs.push(target_name.to_string()),
                     EdgeKind::Reads => reads.push(target_name.to_string()),
                     EdgeKind::Writes => writes.push(target_name.to_string()),
                     EdgeKind::Publishes => writes.push(format!("publish:{target_name}")),
                     EdgeKind::Subscribes => reads.push(format!("subscribe:{target_name}")),
-                    EdgeKind::Uses => {}
+                    EdgeKind::Uses
+                    | EdgeKind::Imports
+                    | EdgeKind::Exports
+                    | EdgeKind::Decorates => {}
                 }
             }
         }

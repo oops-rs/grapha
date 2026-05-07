@@ -7,7 +7,9 @@ mod swiftui;
 pub use assets::{enrich_asset_references_with_tree, source_contains_image_asset_markers};
 #[cfg(test)]
 pub use extract::enrich_doc_comments;
-pub use extract::{SwiftExtractor, enrich_doc_comments_with_tree, parse_swift};
+pub use extract::{
+    SwiftExtractor, enrich_codegraph_compat_with_tree, enrich_doc_comments_with_tree, parse_swift,
+};
 #[cfg(test)]
 #[allow(unused_imports)]
 pub use localization::enrich_localization_metadata;
@@ -108,6 +110,134 @@ mod tests {
         let node = find_node(&result, "greet");
         assert_eq!(node.kind, NodeKind::Function);
         assert_eq!(node.visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn extracts_file_and_import_nodes() {
+        let result = extract(
+            r#"
+            import Foundation
+
+            public func greet() { }
+            "#,
+        );
+
+        let file = find_node(&result, "test.swift");
+        assert_eq!(file.kind, NodeKind::File);
+
+        let import = find_node(&result, "Foundation");
+        assert_eq!(import.kind, NodeKind::Import);
+        assert_eq!(import.signature.as_deref(), Some("import Foundation"));
+
+        let greet = find_node(&result, "greet");
+        assert!(has_edge(&result, &file.id, &import.id, EdgeKind::Contains));
+        assert!(has_edge(&result, &file.id, &import.id, EdgeKind::Imports));
+        assert!(has_edge(&result, &file.id, &greet.id, EdgeKind::Contains));
+    }
+
+    #[test]
+    fn extracts_swiftui_component_and_vapor_route_nodes() {
+        let result = extract(
+            r#"
+            import SwiftUI
+            import Vapor
+
+            struct ContentView: View {
+                var body: some View { Text("Hi") }
+            }
+
+            func routes(_ app: Application) throws {
+                app.get("health") { req in "ok" }
+                app.grouped("api").post("users") { req in "ok" }
+            }
+            "#,
+        );
+
+        let file = find_node(&result, "test.swift");
+        let component = result
+            .nodes
+            .iter()
+            .find(|node| node.name == "ContentView" && node.kind == NodeKind::Component)
+            .expect("component node should exist");
+        let health = find_node(&result, "GET health");
+        let users = find_node(&result, "POST /api/users");
+
+        assert_eq!(health.kind, NodeKind::Route);
+        assert_eq!(users.kind, NodeKind::Route);
+        assert!(has_edge(
+            &result,
+            &file.id,
+            &component.id,
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(&result, &file.id, &health.id, EdgeKind::Contains));
+        assert!(has_edge(&result, &file.id, &users.id, EdgeKind::Contains));
+    }
+
+    #[test]
+    fn compat_enrichment_adds_nodes_to_preexisting_swift_result() {
+        let source = r#"
+            import SwiftUI
+
+            struct ContentView: View {
+                var body: some View { Text("Hi") }
+            }
+        "#;
+        let tree = parse_swift(source.as_bytes()).unwrap();
+        let mut result = ExtractionResult {
+            nodes: vec![Node {
+                id: "s:ContentView".to_string(),
+                kind: NodeKind::Struct,
+                name: "ContentView".to_string(),
+                file: Path::new("test.swift").into(),
+                span: Span {
+                    start: [3, 12],
+                    end: [5, 13],
+                },
+                visibility: Visibility::Crate,
+                metadata: HashMap::new(),
+                role: None,
+                signature: None,
+                doc_comment: None,
+                module: None,
+                snippet: None,
+                repo: None,
+            }],
+            edges: Vec::new(),
+            imports: Vec::new(),
+        };
+
+        enrich_codegraph_compat_with_tree(
+            source.as_bytes(),
+            Path::new("test.swift"),
+            &tree,
+            &mut result,
+        )
+        .unwrap();
+
+        let file = find_node(&result, "test.swift");
+        let import = find_node(&result, "SwiftUI");
+        let component = result
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Component && node.name == "ContentView")
+            .expect("component node should exist");
+
+        assert_eq!(file.kind, NodeKind::File);
+        assert_eq!(import.kind, NodeKind::Import);
+        assert!(has_edge(
+            &result,
+            &file.id,
+            "s:ContentView",
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(&result, &file.id, &import.id, EdgeKind::Imports));
+        assert!(has_edge(
+            &result,
+            &file.id,
+            &component.id,
+            EdgeKind::Contains
+        ));
     }
 
     #[test]

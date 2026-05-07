@@ -68,6 +68,18 @@ fn should_enforce_hint(target: &str, hint: &str) -> bool {
         || hint.chars().any(|ch| ch.is_ascii_uppercase())
 }
 
+fn is_resolvable_symbol_kind(kind: NodeKind) -> bool {
+    !matches!(
+        kind,
+        NodeKind::File
+            | NodeKind::Import
+            | NodeKind::Export
+            | NodeKind::Parameter
+            | NodeKind::View
+            | NodeKind::Branch
+    )
+}
+
 pub fn merge(results: Vec<ExtractionResult>) -> Graph {
     let mut graph = Graph::new();
 
@@ -97,7 +109,7 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
 
     let mut name_to_entries: HashMap<&str, Vec<NameEntry>> = HashMap::new();
     for node in &graph.nodes {
-        if matches!(node.kind, NodeKind::View | NodeKind::Branch) {
+        if !is_resolvable_symbol_kind(node.kind) {
             continue;
         }
         name_to_entries

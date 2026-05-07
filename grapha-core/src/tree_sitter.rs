@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use regex::Regex;
 use tree_sitter::{Node as TsNode, Parser};
 
 use crate::extract::{ExtractionResult, LanguageExtractor};
@@ -45,14 +46,18 @@ impl LanguageExtractor for GenericTreeSitterExtractor {
             anyhow::anyhow!("tree-sitter failed to parse {} source", self.config.id)
         })?;
 
+        let root = tree.root_node();
         let mut state = ExtractionState {
             config: self.config,
             source,
             file: file_path.to_string_lossy().to_string(),
+            file_node_id: format!("file:{}", file_path.to_string_lossy()),
             result: ExtractionResult::new(),
             scopes: Vec::new(),
         };
-        state.walk(tree.root_node());
+        state.push_file_node(root, file_path);
+        state.walk(root);
+        state.extract_framework_nodes();
         Ok(state.result)
     }
 }
@@ -67,6 +72,7 @@ struct ExtractionState<'a> {
     config: &'static TreeSitterLanguageConfig,
     source: &'a [u8],
     file: String,
+    file_node_id: String,
     result: ExtractionResult,
     scopes: Vec<Scope>,
 }
@@ -311,7 +317,7 @@ impl ExtractionState<'_> {
         let node_kind = if declaration_text_contains(declaration, self.source, "const") {
             NodeKind::Constant
         } else {
-            NodeKind::Property
+            NodeKind::Variable
         };
         self.push_named_node(node, node_kind, name, declaration, false)
             .is_some()
@@ -350,7 +356,10 @@ impl ExtractionState<'_> {
         if imports.is_empty() {
             return false;
         }
-        self.result.imports.extend(imports);
+        for import in imports {
+            self.push_import_node(node, &import.path, &raw);
+            self.result.imports.push(import);
+        }
         true
     }
 
@@ -402,9 +411,15 @@ impl ExtractionState<'_> {
         let parent_id = self.current_scope_id().map(ToString::to_string);
         let proposed_id = make_decl_id(&self.file, parent_id.as_deref(), &name);
         let id = unique_id(&self.result, proposed_id, position_node);
-        if let Some(parent_id) = parent_id {
+        let contains_source = parent_id.unwrap_or_else(|| self.file_node_id.clone());
+        if self
+            .result
+            .nodes
+            .iter()
+            .any(|node| node.id == contains_source)
+        {
             self.result.edges.push(Edge {
-                source: parent_id.clone(),
+                source: contains_source.clone(),
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 confidence: 1.0,
@@ -412,7 +427,7 @@ impl ExtractionState<'_> {
                 operation: None,
                 condition: None,
                 async_boundary: None,
-                provenance: edge_provenance(&self.file, position_node, &parent_id),
+                provenance: edge_provenance(&self.file, position_node, &contains_source),
                 repo: None,
             });
         }
@@ -444,6 +459,88 @@ impl ExtractionState<'_> {
             doc_comment: doc_comment_before(node, self.source),
             module: None,
             snippet: None,
+            repo: None,
+        });
+
+        Some(id)
+    }
+
+    fn push_file_node(&mut self, root: TsNode, file_path: &Path) {
+        let mut metadata = HashMap::new();
+        metadata.insert("language".to_string(), self.config.id.to_string());
+
+        let name = file_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&self.file)
+            .to_string();
+
+        self.result.nodes.push(Node {
+            id: self.file_node_id.clone(),
+            kind: NodeKind::File,
+            name,
+            file: self.file.clone().into(),
+            span: make_span(root),
+            visibility: Visibility::Private,
+            metadata,
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
+            snippet: None,
+            repo: None,
+        });
+    }
+
+    fn push_import_node(&mut self, node: TsNode, name: &str, signature: &str) -> Option<String> {
+        let name = clean_identifier(name.to_string());
+        if name.is_empty() {
+            return None;
+        }
+
+        let proposed_id = make_decl_id(&self.file, None, &format!("import:{name}"));
+        let id = unique_id(&self.result, proposed_id, node);
+        self.result.edges.push(Edge {
+            source: self.file_node_id.clone(),
+            target: id.clone(),
+            kind: EdgeKind::Contains,
+            confidence: 1.0,
+            direction: None,
+            operation: None,
+            condition: None,
+            async_boundary: None,
+            provenance: edge_provenance(&self.file, node, &self.file_node_id),
+            repo: None,
+        });
+
+        let mut metadata = HashMap::new();
+        metadata.insert("language".to_string(), self.config.id.to_string());
+
+        self.result.nodes.push(Node {
+            id: id.clone(),
+            kind: NodeKind::Import,
+            name,
+            file: self.file.clone().into(),
+            span: make_span(node),
+            visibility: Visibility::Private,
+            metadata,
+            role: None,
+            signature: Some(signature.trim().to_string()),
+            doc_comment: None,
+            module: None,
+            snippet: None,
+            repo: None,
+        });
+        self.result.edges.push(Edge {
+            source: self.file_node_id.clone(),
+            target: id.clone(),
+            kind: EdgeKind::Imports,
+            confidence: 0.9,
+            direction: None,
+            operation: None,
+            condition: None,
+            async_boundary: None,
+            provenance: edge_provenance(&self.file, node, &self.file_node_id),
             repo: None,
         });
 
@@ -486,6 +583,272 @@ impl ExtractionState<'_> {
         }
         fallback
     }
+
+    fn extract_framework_nodes(&mut self) {
+        let Ok(content) = std::str::from_utf8(self.source) else {
+            return;
+        };
+
+        match self.config.id {
+            "typescript" | "tsx" | "javascript" => {
+                self.extract_javascript_framework_nodes(content);
+            }
+            "python" => self.extract_python_framework_nodes(content),
+            "go" => self.extract_go_framework_nodes(content),
+            "java" => self.extract_java_framework_nodes(content),
+            "csharp" => self.extract_csharp_framework_nodes(content),
+            "php" => self.extract_php_framework_nodes(content),
+            "ruby" => self.extract_ruby_framework_nodes(content),
+            _ => {}
+        }
+    }
+
+    fn extract_javascript_framework_nodes(&mut self, content: &str) {
+        self.push_route_matches(
+            content,
+            &regex(r#"(?:app|router)\s*\.\s*(get|post|put|patch|delete|all|use)\s*\(\s*["']([^"']+)["']"#),
+            1,
+            2,
+        );
+
+        if self.file.ends_with(".tsx") || self.file.ends_with(".jsx") {
+            for pattern in [
+                r#"(?:export\s+)?function\s+([A-Z][A-Za-z0-9]*)\s*\("#,
+                r#"(?:export\s+)?(?:const|let)\s+([A-Z][A-Za-z0-9]*)\s*=\s*(?:\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s*=>"#,
+                r#"(?:export\s+)?(?:const|let)\s+([A-Z][A-Za-z0-9]*)\s*=\s*(?:React\.)?(?:forwardRef|memo)"#,
+            ] {
+                let re = regex(pattern);
+                for capture in re.captures_iter(content) {
+                    let Some(full_match) = capture.get(0) else {
+                        continue;
+                    };
+                    let Some(name) = capture.get(1).map(|m| m.as_str()) else {
+                        continue;
+                    };
+                    let lookahead = content
+                        .get(full_match.end()..)
+                        .unwrap_or("")
+                        .chars()
+                        .take(500)
+                        .collect::<String>();
+                    if lookahead.contains('<')
+                        && (lookahead.contains("/>") || lookahead.contains("</"))
+                    {
+                        self.push_synthetic_node(
+                            NodeKind::Component,
+                            "component",
+                            name,
+                            full_match.start(),
+                            full_match.end(),
+                            component_metadata(self.config.id),
+                        );
+                    }
+                }
+            }
+        }
+
+        if (self.file.contains("/pages/")
+            || self.file.starts_with("pages/")
+            || self.file.contains("/app/")
+            || self.file.starts_with("app/"))
+            && let Some(export_index) = content.find("export default")
+            && let Some(route) = nextjs_route_path(&self.file)
+        {
+            self.push_synthetic_node(
+                NodeKind::Route,
+                "route",
+                &route,
+                export_index,
+                export_index + "export default".len(),
+                route_metadata(self.config.id, None, Some(&route)),
+            );
+        }
+    }
+
+    fn extract_python_framework_nodes(&mut self, content: &str) {
+        self.push_route_matches(
+            content,
+            &regex(r#"@\w+\.route\s*\(\s*['"]([^'"]+)['"]"#),
+            0,
+            1,
+        );
+        self.push_route_matches(
+            content,
+            &regex(r#"@\w+\.(get|post|put|patch|delete|options|head)\s*\(\s*['"]([^'"]+)['"]"#),
+            1,
+            2,
+        );
+        self.push_route_matches(content, &regex(r#"path\s*\(\s*['"]([^'"]+)['"]"#), 0, 1);
+    }
+
+    fn extract_go_framework_nodes(&mut self, content: &str) {
+        self.push_route_matches(
+            content,
+            &regex(r#"\.\s*(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s*\(\s*["']([^"']+)["']"#),
+            1,
+            2,
+        );
+        self.push_route_matches(
+            content,
+            &regex(r#"\.\s*(Get|Post|Put|Patch|Delete|Options|Head)\s*\(\s*["']([^"']+)["']"#),
+            1,
+            2,
+        );
+        self.push_route_matches(
+            content,
+            &regex(r#"HandleFunc\s*\(\s*["']([^"']+)["']"#),
+            0,
+            1,
+        );
+    }
+
+    fn extract_java_framework_nodes(&mut self, content: &str) {
+        self.push_route_matches(
+            content,
+            &regex(r#"@(Get|Post|Put|Patch|Delete)Mapping\s*(?:\(\s*(?:value\s*=\s*)?["']([^"']+)["'])?"#),
+            1,
+            2,
+        );
+        self.push_route_matches(
+            content,
+            &regex(r#"@RequestMapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']"#),
+            0,
+            1,
+        );
+    }
+
+    fn extract_csharp_framework_nodes(&mut self, content: &str) {
+        self.push_route_matches(
+            content,
+            &regex(
+                r#"\[Http(Get|Post|Put|Patch|Delete|Head|Options)(?:\s*\(\s*["']([^"']+)["'])?"#,
+            ),
+            1,
+            2,
+        );
+        self.push_route_matches(
+            content,
+            &regex(r#"\.Map(Get|Post|Put|Patch|Delete)\s*\(\s*["']([^"']+)["']"#),
+            1,
+            2,
+        );
+    }
+
+    fn extract_php_framework_nodes(&mut self, content: &str) {
+        self.push_route_matches(
+            content,
+            &regex(r#"Route::(get|post|put|patch|delete|any|resource)\s*\(\s*['"]([^'"]+)['"]"#),
+            1,
+            2,
+        );
+    }
+
+    fn extract_ruby_framework_nodes(&mut self, content: &str) {
+        self.push_route_matches(
+            content,
+            &regex(r#"(?m)^\s*(get|post|put|patch|delete)\s+['"]([^'"]+)['"]"#),
+            1,
+            2,
+        );
+        self.push_route_matches(
+            content,
+            &regex(r#"(?m)^\s*resources\s+:([A-Za-z_][A-Za-z0-9_]*)"#),
+            0,
+            1,
+        );
+        self.push_route_matches(content, &regex(r#"(?m)^\s*root\s+['"]([^'"]+)['"]"#), 0, 1);
+    }
+
+    fn push_route_matches(
+        &mut self,
+        content: &str,
+        re: &Regex,
+        method_group: usize,
+        path_group: usize,
+    ) {
+        for capture in re.captures_iter(content) {
+            let Some(full_match) = capture.get(0) else {
+                continue;
+            };
+            let method = if method_group == 0 {
+                None
+            } else {
+                capture
+                    .get(method_group)
+                    .map(|m| normalize_http_method(m.as_str()))
+            };
+            let path = capture
+                .get(path_group)
+                .map(|m| normalize_route_path(m.as_str()))
+                .unwrap_or_default();
+            if path.is_empty() && method.is_none() {
+                continue;
+            }
+            let name = route_name(method.as_deref(), &path);
+            self.push_synthetic_node(
+                NodeKind::Route,
+                "route",
+                &name,
+                full_match.start(),
+                full_match.end(),
+                route_metadata(self.config.id, method.as_deref(), Some(&path)),
+            );
+        }
+    }
+
+    fn push_synthetic_node(
+        &mut self,
+        kind: NodeKind,
+        id_prefix: &str,
+        name: &str,
+        start_byte: usize,
+        end_byte: usize,
+        mut metadata: HashMap<String, String>,
+    ) {
+        if name.is_empty() {
+            return;
+        }
+        let span = span_from_byte_range(self.source, start_byte, end_byte);
+        let line = span.start[0] + 1;
+        let proposed_id = format!("{id_prefix}:{}:{name}:{line}", self.file);
+        let id = unique_synthetic_id(&self.result, proposed_id, &span);
+        if self.result.nodes.iter().any(|node| node.id == id) {
+            return;
+        }
+        metadata.insert("language".to_string(), self.config.id.to_string());
+
+        self.result.nodes.push(Node {
+            id: id.clone(),
+            kind,
+            name: name.to_string(),
+            file: self.file.clone().into(),
+            span: span.clone(),
+            visibility: Visibility::Public,
+            metadata,
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
+            snippet: None,
+            repo: None,
+        });
+        self.result.edges.push(Edge {
+            source: self.file_node_id.clone(),
+            target: id,
+            kind: EdgeKind::Contains,
+            confidence: 1.0,
+            direction: None,
+            operation: None,
+            condition: None,
+            async_boundary: None,
+            provenance: vec![EdgeProvenance {
+                file: self.file.clone().into(),
+                span,
+                symbol_id: self.file_node_id.clone(),
+            }],
+            repo: None,
+        });
+    }
 }
 
 fn make_decl_id(file: &str, parent_id: Option<&str>, name: &str) -> String {
@@ -503,6 +866,145 @@ fn unique_id(result: &ExtractionResult, proposed: String, node: TsNode) -> Strin
         "{proposed}@{}:{}:{}:{}",
         span.start[0], span.start[1], span.end[0], span.end[1]
     )
+}
+
+fn unique_synthetic_id(result: &ExtractionResult, proposed: String, span: &Span) -> String {
+    if result.nodes.iter().all(|existing| existing.id != proposed) {
+        return proposed;
+    }
+    format!(
+        "{proposed}@{}:{}:{}:{}",
+        span.start[0], span.start[1], span.end[0], span.end[1]
+    )
+}
+
+fn regex(pattern: &str) -> Regex {
+    Regex::new(pattern).expect("framework extractor regex should compile")
+}
+
+fn span_from_byte_range(source: &[u8], start_byte: usize, end_byte: usize) -> Span {
+    Span {
+        start: point_for_byte(source, start_byte),
+        end: point_for_byte(source, end_byte),
+    }
+}
+
+fn point_for_byte(source: &[u8], target: usize) -> [usize; 2] {
+    let mut row = 0usize;
+    let mut column = 0usize;
+    for byte in source.iter().take(target.min(source.len())) {
+        if *byte == b'\n' {
+            row += 1;
+            column = 0;
+        } else {
+            column += 1;
+        }
+    }
+    [row, column]
+}
+
+fn normalize_http_method(method: &str) -> String {
+    method.to_ascii_uppercase()
+}
+
+fn normalize_route_path(path: &str) -> String {
+    let path = path.trim();
+    if path.is_empty() {
+        String::new()
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    }
+}
+
+fn route_name(method: Option<&str>, path: &str) -> String {
+    match (method, path.is_empty()) {
+        (Some(method), true) => method.to_string(),
+        (Some(method), false) => format!("{method} {path}"),
+        (None, _) => path.to_string(),
+    }
+}
+
+fn route_metadata(
+    language: &str,
+    method: Option<&str>,
+    path: Option<&str>,
+) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    metadata.insert("framework.kind".to_string(), "route".to_string());
+    metadata.insert("language".to_string(), language.to_string());
+    if let Some(method) = method {
+        metadata.insert("route.method".to_string(), method.to_string());
+    }
+    if let Some(path) = path {
+        metadata.insert("route.path".to_string(), path.to_string());
+    }
+    metadata
+}
+
+fn component_metadata(language: &str) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    metadata.insert("framework.kind".to_string(), "component".to_string());
+    metadata.insert("language".to_string(), language.to_string());
+    metadata
+}
+
+fn nextjs_route_path(file: &str) -> Option<String> {
+    let normalized = file.replace('\\', "/");
+    if let Some(after_pages) = normalized.strip_prefix("pages/") {
+        return Some(route_path_from_file(after_pages));
+    }
+    if let Some(after_pages) = normalized.split("/pages/").nth(1) {
+        return Some(route_path_from_file(after_pages));
+    }
+    if let Some(after_app) = normalized.strip_prefix("app/")
+        && (after_app.ends_with("/page.tsx")
+            || after_app.ends_with("/page.ts")
+            || after_app.ends_with("/page.jsx")
+            || after_app.ends_with("/page.js"))
+    {
+        let route_file = after_app.trim_end_matches("/page.tsx");
+        let route_file = route_file.trim_end_matches("/page.ts");
+        let route_file = route_file.trim_end_matches("/page.jsx");
+        let route_file = route_file.trim_end_matches("/page.js");
+        return Some(route_path_from_file(route_file));
+    }
+    if let Some(after_app) = normalized.split("/app/").nth(1)
+        && (after_app.ends_with("/page.tsx")
+            || after_app.ends_with("/page.ts")
+            || after_app.ends_with("/page.jsx")
+            || after_app.ends_with("/page.js"))
+    {
+        let route_file = after_app.trim_end_matches("/page.tsx");
+        let route_file = route_file.trim_end_matches("/page.ts");
+        let route_file = route_file.trim_end_matches("/page.jsx");
+        let route_file = route_file.trim_end_matches("/page.js");
+        return Some(route_path_from_file(route_file));
+    }
+    None
+}
+
+fn route_path_from_file(path: &str) -> String {
+    let mut path = path
+        .trim_end_matches(".tsx")
+        .trim_end_matches(".ts")
+        .trim_end_matches(".jsx")
+        .trim_end_matches(".js")
+        .trim_end_matches("/index")
+        .replace("[", ":")
+        .replace("]", "");
+    if path == "index" {
+        path.clear();
+    }
+    let route = if path.is_empty() {
+        "/".to_string()
+    } else if path.starts_with('/') {
+        path
+    } else {
+        format!("/{path}")
+    };
+    route.replace("//", "/")
 }
 
 fn make_span(node: TsNode) -> Span {

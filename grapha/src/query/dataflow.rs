@@ -145,10 +145,19 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::Publishes => "publish",
         EdgeKind::Subscribes => "subscribe",
         EdgeKind::Uses
+        | EdgeKind::Imports
+        | EdgeKind::Exports
         | EdgeKind::Implements
         | EdgeKind::Contains
         | EdgeKind::TypeRef
-        | EdgeKind::Inherits => "effect",
+        | EdgeKind::References
+        | EdgeKind::TypeOf
+        | EdgeKind::Returns
+        | EdgeKind::Inherits
+        | EdgeKind::Extends
+        | EdgeKind::Instantiates
+        | EdgeKind::Overrides
+        | EdgeKind::Decorates => "effect",
     }
 }
 
@@ -164,11 +173,20 @@ fn semantic_edge_kinds(edge: &Edge) -> Vec<DataflowEdgeKind> {
             EdgeKind::Writes => vec![DataflowEdgeKind::Write],
             EdgeKind::Publishes => vec![DataflowEdgeKind::Publish],
             EdgeKind::Subscribes => vec![DataflowEdgeKind::Subscribe],
+            EdgeKind::Instantiates => vec![DataflowEdgeKind::Call],
             EdgeKind::Uses
+            | EdgeKind::Imports
+            | EdgeKind::Exports
             | EdgeKind::Implements
             | EdgeKind::Contains
             | EdgeKind::TypeRef
-            | EdgeKind::Inherits => Vec::new(),
+            | EdgeKind::References
+            | EdgeKind::TypeOf
+            | EdgeKind::Returns
+            | EdgeKind::Inherits
+            | EdgeKind::Extends
+            | EdgeKind::Overrides
+            | EdgeKind::Decorates => Vec::new(),
         },
     }
 }
@@ -542,10 +560,19 @@ pub fn query_dataflow_with_options(
                         );
                     }
                     EdgeKind::Uses
+                    | EdgeKind::Imports
+                    | EdgeKind::Exports
                     | EdgeKind::Implements
                     | EdgeKind::Contains
                     | EdgeKind::TypeRef
-                    | EdgeKind::Inherits => {}
+                    | EdgeKind::References
+                    | EdgeKind::TypeOf
+                    | EdgeKind::Returns
+                    | EdgeKind::Inherits
+                    | EdgeKind::Extends
+                    | EdgeKind::Instantiates
+                    | EdgeKind::Overrides
+                    | EdgeKind::Decorates => {}
                 }
             }
         }
