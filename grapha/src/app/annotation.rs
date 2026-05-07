@@ -1,4 +1,13 @@
+use std::fs::OpenOptions;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::Context;
+
 use crate::AnnotationCommands;
+
+const DAEMON_LOG_STDERR_ENV: &str = "GRAPHA_ANNOTATION_LOG_STDERR";
 
 fn resolve_sync_server(
     path: &std::path::Path,
@@ -40,13 +49,26 @@ pub(crate) fn handle_annotation_command(command: AnnotationCommands) -> anyhow::
         AnnotationCommands::Serve {
             path: _,
             port,
+            log_file,
+            daemon,
             watch,
         } => {
             if watch {
                 eprintln!("annotation service is standalone; --watch is accepted but ignored");
             }
+            let log_file = log_file.unwrap_or_else(crate::config::default_annotation_log_path);
+            if daemon {
+                return spawn_annotation_service_daemon(port, &log_file);
+            }
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(crate::serve::run_annotation_service(port))?;
+            let mirror_stderr = std::env::var(DAEMON_LOG_STDERR_ENV)
+                .map(|value| value != "0")
+                .unwrap_or(true);
+            rt.block_on(crate::serve::run_annotation_service(
+                port,
+                log_file,
+                mirror_stderr,
+            ))?;
             Ok(())
         }
         AnnotationCommands::Sync { server, path } => {
@@ -70,6 +92,86 @@ pub(crate) fn handle_annotation_command(command: AnnotationCommands) -> anyhow::
             Ok(())
         }
     }
+}
+
+fn spawn_annotation_service_daemon(port: u16, log_file: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = log_file.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "creating annotation service log directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    append_daemon_log_line(
+        log_file,
+        &format!("starting annotation service daemon on 0.0.0.0:{port}"),
+    )?;
+
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)
+        .with_context(|| format!("opening annotation service log file {}", log_file.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .context("cloning annotation service log file handle")?;
+    let executable = std::env::current_exe().context("locating current grapha executable")?;
+    let child = Command::new(executable)
+        .arg("annotation")
+        .arg("serve")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--log-file")
+        .arg(log_file)
+        .env(DAEMON_LOG_STDERR_ENV, "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .context("starting annotation service daemon")?;
+
+    append_daemon_log_line(
+        log_file,
+        &format!(
+            "annotation service daemon started pid={} port={port}",
+            child.id()
+        ),
+    )?;
+    eprintln!(
+        "  \x1b[32m✓\x1b[0m annotation service daemon started at http://localhost:{port} (pid {}, log {})",
+        child.id(),
+        log_file.display()
+    );
+    Ok(())
+}
+
+fn append_daemon_log_line(log_file: &Path, message: &str) -> anyhow::Result<()> {
+    if let Some(parent) = log_file.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "creating annotation service log directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)
+        .with_context(|| format!("opening annotation service log file {}", log_file.display()))?;
+    use std::io::Write;
+    writeln!(file, "{} {message}", annotation_log_timestamp())?;
+    Ok(())
+}
+
+fn annotation_log_timestamp() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    format!("[unix_ms={millis}]")
 }
 
 #[cfg(test)]
@@ -143,5 +245,16 @@ mod tests {
                 .to_string()
                 .contains("annotation server not configured")
         );
+    }
+
+    #[test]
+    fn daemon_log_line_creates_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_file = dir.path().join("config").join("annotation-service.log");
+
+        append_daemon_log_line(&log_file, "daemon test").unwrap();
+
+        let contents = std::fs::read_to_string(log_file).unwrap();
+        assert!(contents.contains("daemon test"));
     }
 }

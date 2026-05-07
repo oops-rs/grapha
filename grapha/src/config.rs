@@ -155,6 +155,22 @@ pub fn load_global_config() -> GraphaConfig {
     load_first_existing_config(global_config_paths())
 }
 
+pub fn default_config_dir() -> PathBuf {
+    default_config_dir_from_paths(global_config_paths())
+}
+
+pub fn default_annotation_log_path() -> PathBuf {
+    default_config_dir().join("annotation-service.log")
+}
+
+fn default_config_dir_from_paths(paths: Vec<PathBuf>) -> PathBuf {
+    paths
+        .into_iter()
+        .next()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from(".grapha"))
+}
+
 pub fn global_config_paths() -> Vec<PathBuf> {
     global_config_paths_from_env(
         |key| std::env::var_os(key),
@@ -404,6 +420,19 @@ server = "http://192.168.1.10:8080"
         assert_eq!(
             config.annotations.server.as_deref(),
             Some("http://192.168.1.10:8080")
+        );
+    }
+
+    #[test]
+    fn default_annotation_log_path_uses_config_directory() {
+        let config_dir = default_config_dir_from_paths(vec![PathBuf::from(
+            "/home/dev/.config/grapha/config.toml",
+        )]);
+
+        assert_eq!(config_dir, PathBuf::from("/home/dev/.config/grapha"));
+        assert_eq!(
+            config_dir.join("annotation-service.log"),
+            PathBuf::from("/home/dev/.config/grapha/annotation-service.log")
         );
     }
 

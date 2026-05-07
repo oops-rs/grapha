@@ -282,6 +282,12 @@ enum AnnotationCommands {
         /// Port to listen on
         #[arg(long, default_value = "8080")]
         port: u16,
+        /// Log file path. Defaults to the Grapha config directory's annotation-service.log.
+        #[arg(long)]
+        log_file: Option<PathBuf>,
+        /// Start the annotation service in the background.
+        #[arg(long)]
+        daemon: bool,
         /// Deprecated; annotation service has no project watcher
         #[arg(long, hide = true)]
         watch: bool,

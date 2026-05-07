@@ -308,19 +308,35 @@ pub async fn list_standalone_annotations(
 ) -> Response {
     let project_id = match request_project_id(params.project_id.as_deref(), &[]) {
         Ok(project_id) => project_id,
-        Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
+        Err(error) => {
+            state
+                .log
+                .event(format!("annotations list rejected error=\"{error}\""));
+            return error_response(StatusCode::BAD_REQUEST, error.to_string());
+        }
     };
+    state.log.event(format!(
+        "annotations list requested project_id={project_id}"
+    ));
     let store = match crate::annotations::AnnotationStore::for_project_id_with_data_root(
         &project_id,
         &state.data_root,
     ) {
         Ok(store) => store,
-        Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
+        Err(error) => {
+            state.log.event(format!(
+                "annotations list rejected project_id={project_id} error=\"{error}\""
+            ));
+            return error_response(StatusCode::BAD_REQUEST, error.to_string());
+        }
     };
 
     match store.list_records() {
         Ok(records) => {
             let total = records.len();
+            state.log.event(format!(
+                "annotations list completed project_id={project_id} total={total}"
+            ));
             Json(serde_json::json!({
                 "project": {
                     "project_id": project_id,
@@ -330,10 +346,15 @@ pub async fn list_standalone_annotations(
             }))
             .into_response()
         }
-        Err(error) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to load annotations: {error}"),
-        ),
+        Err(error) => {
+            state.log.event(format!(
+                "annotations list failed project_id={project_id} error=\"{error}\""
+            ));
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load annotations: {error}"),
+            )
+        }
     }
 }
 
@@ -352,7 +373,12 @@ pub async fn sync_standalone_annotations(
         let project_id =
             match request_project_id(fallback_project_id, std::slice::from_ref(&record)) {
                 Ok(project_id) => project_id,
-                Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
+                Err(error) => {
+                    state
+                        .log
+                        .event(format!("annotations sync rejected error=\"{error}\""));
+                    return error_response(StatusCode::BAD_REQUEST, error.to_string());
+                }
             };
         if record.project_id.trim().is_empty() {
             record.project_id = project_id.clone();
@@ -361,6 +387,10 @@ pub async fn sync_standalone_annotations(
     }
 
     let received = grouped.values().map(Vec::len).sum::<usize>();
+    state.log.event(format!(
+        "annotations sync requested projects={} received={received}",
+        grouped.len()
+    ));
     let mut merged = 0usize;
     for (project_id, records) in grouped {
         let store = match crate::annotations::AnnotationStore::for_project_id_with_data_root(
@@ -368,11 +398,25 @@ pub async fn sync_standalone_annotations(
             &state.data_root,
         ) {
             Ok(store) => store,
-            Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
+            Err(error) => {
+                state.log.event(format!(
+                    "annotations sync rejected project_id={project_id} error=\"{error}\""
+                ));
+                return error_response(StatusCode::BAD_REQUEST, error.to_string());
+            }
         };
         match store.merge_records(&records) {
-            Ok(count) => merged += count,
+            Ok(count) => {
+                merged += count;
+                state.log.event(format!(
+                    "annotations sync merged project_id={project_id} received={} merged={count}",
+                    records.len()
+                ));
+            }
             Err(error) => {
+                state.log.event(format!(
+                    "annotations sync failed project_id={project_id} error=\"{error}\""
+                ));
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     format!("failed to merge annotations: {error}"),
@@ -381,6 +425,9 @@ pub async fn sync_standalone_annotations(
         }
     }
 
+    state.log.event(format!(
+        "annotations sync completed received={received} merged={merged}"
+    ));
     Json(serde_json::json!({
         "merged": merged,
         "received": received
@@ -521,6 +568,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = Arc::new(AnnotationServiceState {
             data_root: dir.path().to_path_buf(),
+            log: crate::serve::AnnotationServiceLog::disabled(),
         });
         let response = sync_standalone_annotations(
             State(state.clone()),
@@ -544,10 +592,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standalone_annotation_sync_logs_counts_without_text() {
+        let dir = tempdir().unwrap();
+        let log_file = dir.path().join("annotation-service.log");
+        let state = Arc::new(AnnotationServiceState {
+            data_root: dir.path().to_path_buf(),
+            log: crate::serve::AnnotationServiceLog::open(log_file.clone(), false).unwrap(),
+        });
+
+        let response = sync_standalone_annotations(
+            State(state),
+            Json(AnnotationSyncRequest {
+                project: None,
+                annotations: vec![annotation_record("remote-demo", "main", "s:DemoUSR")],
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let log = std::fs::read_to_string(log_file).unwrap();
+        assert!(log.contains("annotations sync completed received=1 merged=1"));
+        assert!(!log.contains("Explains a reusable invariant."));
+    }
+
+    #[tokio::test]
     async fn standalone_annotation_list_requires_project_id() {
         let dir = tempdir().unwrap();
         let state = Arc::new(AnnotationServiceState {
             data_root: dir.path().to_path_buf(),
+            log: crate::serve::AnnotationServiceLog::disabled(),
         });
         let response = list_standalone_annotations(
             State(state),

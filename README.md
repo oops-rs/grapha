@@ -163,12 +163,16 @@ Localization queries connect SwiftUI symbol subtrees to strings and usage sites.
 
 ```bash
 grapha annotation serve --port 8080
+grapha annotation serve --daemon --port 8080
+grapha annotation serve --log-file ~/.config/grapha/annotation-service.log
 grapha annotation list [-p PATH]
 grapha annotation sync [-p PATH]
 grapha annotation sync --server http://HOST:8080
 ```
 
 Annotations are local-first notes scoped by project identity, not by branch. Project identity comes from `[repo].name`, Git metadata, or the project path fallback. Sync resolves the service address from `--server`, `GRAPHA_ANNOTATION_SERVER`, project `grapha.toml`, then global Grapha config.
+
+`grapha annotation serve` writes operational logs to the Grapha config directory by default, typically `~/.config/grapha/annotation-service.log`. Use `--log-file` to override the path. `--daemon` starts the standalone annotation service in the background and sends stdout/stderr to the same log file.
 
 ## MCP Server
 
