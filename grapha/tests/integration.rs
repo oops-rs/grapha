@@ -581,7 +581,7 @@ fn cli_smoke_matrix_help_contracts() {
         ),
         (
             vec!["index", "--help"],
-            "Index a project into persistent storage",
+            "Build or refresh the persistent Grapha store",
         ),
         (
             vec!["symbol", "--help"],
@@ -605,7 +605,7 @@ fn cli_smoke_matrix_help_contracts() {
         ),
         (
             vec!["serve", "--mcp", "--help"],
-            "Launch web UI for interactive graph exploration",
+            "Serve an indexed project either as an HTTP graph explorer",
         ),
     ];
 
@@ -616,6 +616,55 @@ fn cli_smoke_matrix_help_contracts() {
             .success()
             .stdout(predicate::str::contains(expected));
     }
+}
+
+#[test]
+fn rich_help_examples_are_rendered() {
+    grapha()
+        .args(["--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Grapha indexes source into a symbol graph",
+        ))
+        .stdout(predicate::str::contains("Typical workflow:"))
+        .stdout(predicate::str::contains("grapha serve --mcp --watch"));
+
+    grapha()
+        .args(["index", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Build or refresh the persistent Grapha store",
+        ))
+        .stdout(predicate::str::contains("grapha index . --timing"));
+
+    grapha()
+        .args(["symbol", "search", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Search the indexed graph"))
+        .stdout(predicate::str::contains("ProfileAPI --repo FrameUI"));
+
+    grapha()
+        .args(["flow", "trace", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "reverse traces start at a symbol or terminal",
+        ))
+        .stdout(predicate::str::contains(
+            "grapha flow trace sendGift --direction reverse",
+        ));
+
+    grapha()
+        .args(["repo", "smells", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Scan the indexed graph for structural code smells",
+        ))
+        .stdout(predicate::str::contains("grapha repo smells --module Room"));
 }
 
 #[test]

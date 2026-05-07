@@ -41,7 +41,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(
     name = "grapha",
     version,
-    about = "Structural code graph for LLM consumption"
+    about = "Fast code intelligence CLI and MCP server for Swift, Rust, and tree-sitter languages",
+    long_about = "Grapha indexes source into a symbol graph for search, context, impact analysis, dataflow tracing, repository health checks, and MCP-based agent workflows.\n\nSwift uses Xcode index stores when available, then falls back through SwiftSyntax and tree-sitter. Rust and other supported languages use tree-sitter extraction with name-based relationships.",
+    after_help = "Typical workflow:\n  grapha index .\n  grapha repo status\n  grapha symbol search ViewModel --context\n  grapha symbol impact GiftPanelViewModel --format tree\n  grapha serve --mcp --watch\n\nUse `grapha <command> --help` for task-specific examples."
 )]
 struct Cli {
     /// ANSI color mode for tree output
@@ -178,6 +180,10 @@ enum Commands {
         compact: bool,
     },
     /// Index a project into persistent storage
+    #[command(
+        long_about = "Build or refresh the persistent Grapha store for a project. Indexing is incremental by default, writes graph/search/localization/asset snapshots under the project store, and can be forced into a full rebuild when inputs or schemas need a clean pass.",
+        after_help = "Examples:\n  grapha index .\n  grapha index . --timing\n  grapha index /path/to/project --full-rebuild"
+    )]
     Index {
         /// Project directory to index
         path: PathBuf,
@@ -207,6 +213,10 @@ enum Commands {
         force: bool,
     },
     /// Launch web UI for interactive graph exploration
+    #[command(
+        long_about = "Serve an indexed project either as an HTTP graph explorer or as a JSON-RPC MCP server over stdio for AI agents. Use --watch to keep the graph fresh while files change.",
+        after_help = "Examples:\n  grapha index .\n  grapha serve --port 8080\n  grapha serve --mcp --watch -p ."
+    )]
     Serve {
         /// Project directory
         #[arg(short, long, default_value = ".")]
@@ -277,6 +287,10 @@ enum AnnotationCommands {
         watch: bool,
     },
     /// Bidirectionally sync annotations with a Grapha annotation service
+    #[command(
+        long_about = "Sync this project's local annotation records with a standalone Grapha annotation service. The project identity comes from grapha.toml, Git metadata, or the project path so notes survive normal branch switches.",
+        after_help = "Examples:\n  grapha annotation sync\n  grapha annotation sync --server http://192.168.1.10:8080\n  GRAPHA_ANNOTATION_SERVER=http://192.168.1.10:8080 grapha annotation sync"
+    )]
     Sync {
         /// Annotation service base URL, e.g. http://192.168.1.10:8080.
         /// Defaults to GRAPHA_ANNOTATION_SERVER, project grapha.toml, or global Grapha config.
@@ -297,6 +311,10 @@ enum AnnotationCommands {
 #[derive(Subcommand)]
 enum SymbolCommands {
     /// Search symbols by name or file
+    #[command(
+        long_about = "Search the indexed graph by symbol name, locator, module, repository, or file. Add --context when you want snippets and immediate relationships in the same result set.",
+        after_help = "Examples:\n  grapha symbol search ViewModel\n  grapha symbol search send --kind function --module Room --fuzzy\n  grapha symbol search ProfileAPI --repo FrameUI --fields file,repo,locator\n  grapha symbol search RoomPage --context --fields full"
+    )]
     Search {
         /// Search query
         query: String,
@@ -341,6 +359,10 @@ enum SymbolCommands {
         fields: Option<String>,
     },
     /// Query symbol context (callers, callees, implementors)
+    #[command(
+        long_about = "Show a 360-degree neighborhood for a symbol: callers, callees, reads, writes, implementors, containing scopes, and contained declarations. Tree and brief formats are designed for quick terminal inspection.",
+        after_help = "Examples:\n  grapha symbol context RoomPage --format tree\n  grapha symbol context File.swift::helper --fields full\n  grapha symbol context sendGift --format brief --limit 50"
+    )]
     Context {
         /// Symbol name or ID
         symbol: String,
@@ -358,6 +380,10 @@ enum SymbolCommands {
         limit: usize,
     },
     /// Analyze blast radius of changing a symbol
+    #[command(
+        long_about = "Traverse outbound relationships from a symbol to estimate the blast radius of changing it. Increase --depth for a wider search, or use tree/brief formats when reading the result directly.",
+        after_help = "Examples:\n  grapha symbol impact GiftPanelViewModel\n  grapha symbol impact GiftPanelViewModel --depth 2 --format tree\n  grapha symbol impact RoomPage --fields file,module,repo"
+    )]
     Impact {
         /// Symbol name or ID
         symbol: String,
@@ -419,6 +445,10 @@ enum SymbolCommands {
 #[derive(Subcommand)]
 enum FlowCommands {
     /// Trace dataflow forward to terminals or backward to entry points
+    #[command(
+        long_about = "Trace execution/dataflow paths through the graph. Forward traces start at an entry or symbol and look for terminal operations; reverse traces start at a symbol or terminal and find entry points that can reach it.",
+        after_help = "Examples:\n  grapha flow trace RoomPage --format tree\n  grapha flow trace sendGift --direction reverse\n  grapha flow trace CheckoutView --depth 12 --limit 100"
+    )]
     Trace {
         /// Symbol name or ID
         symbol: String,
@@ -462,6 +492,10 @@ enum FlowCommands {
         limit: usize,
     },
     /// Trace backward to likely API/data origins for a UI symbol
+    #[command(
+        long_about = "Find likely API, persistence, cache, event, keychain, or search origins that feed a UI-facing symbol by walking backward through calls, reads, and type relationships.",
+        after_help = "Examples:\n  grapha flow origin UserProfileView --terminal-kind network --format tree\n  grapha flow origin GiftBannerPage --fields full\n  grapha flow origin RoomPage --depth 15 --limit 50"
+    )]
     Origin {
         /// Symbol name or ID
         symbol: String,
@@ -572,6 +606,10 @@ enum AssetCommands {
 #[derive(Subcommand)]
 enum ConceptCommands {
     /// Search for likely scopes related to a business concept
+    #[command(
+        long_about = "Search for code that likely implements a product/business concept by combining confirmed bindings, aliases, localization text, asset names, and symbol search signals.",
+        after_help = "Examples:\n  grapha concept search \"gift banner\" --format tree\n  grapha concept search \"送礼横幅\" --limit 10\n  grapha concept bind \"gift banner\" --symbol GiftBannerPage --symbol GiftBannerViewModel"
+    )]
     Search {
         /// Business concept text
         term: String,
@@ -670,6 +708,10 @@ enum RepoCommands {
         path: PathBuf,
     },
     /// Check configured architecture dependency rules
+    #[command(
+        long_about = "Validate configured layer dependency rules from grapha.toml against the indexed graph. Use this to catch forbidden module or layer dependencies before they spread.",
+        after_help = "Examples:\n  grapha repo arch\n  grapha repo arch --format brief\n\nConfigure layers and deny rules in grapha.toml under [[architecture.layers]] and [[architecture.deny]]."
+    )]
     Arch {
         /// Project directory
         #[arg(short, long, default_value = ".")]
@@ -679,6 +721,10 @@ enum RepoCommands {
         format: RepoArchOutputFormat,
     },
     /// Detect code smells across the graph (god types, deep nesting, wide invalidation, etc.)
+    #[command(
+        long_about = "Scan the indexed graph for structural code smells such as oversized types, deep nesting, broad invalidation surfaces, and suspicious dependency concentration. Scope the scan to keep large repositories readable.",
+        after_help = "Examples:\n  grapha repo smells --format brief\n  grapha repo smells --module Room\n  grapha repo smells --file Modules/Room/Sources/Room/View/RoomPage+Layout.swift\n  grapha repo smells --symbol RoomPageCenterContentView --no-cache"
+    )]
     Smells {
         /// Filter to a specific module
         #[arg(long)]

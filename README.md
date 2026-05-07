@@ -2,42 +2,28 @@
 
 [中文文档](docs/README.CN.md)
 
-**Blazingly fast** code intelligence that gives AI agents compiler-grade understanding of your codebase.
+Grapha is a fast code intelligence CLI and MCP server for building a normalized, queryable graph of a codebase. It is designed for the questions developers and AI agents ask all day:
 
-Grapha builds a symbol-level dependency graph from source code — not by guessing with regex, but by reading the strongest source of structure available. For Swift, it taps directly into Xcode's pre-built index store via binary FFI for 100% type-resolved symbols, then enriches with tree-sitter for view structure, docs, localization, and asset references. For Rust, it uses tree-sitter with Cargo workspace awareness. Other common languages use best-effort tree-sitter extraction for symbols, containment, imports, and name-based calls. The result is a queryable graph with confidence-scored edges, dataflow tracing, impact analysis, code smell detection, and business-concept lookup — available as both a CLI and an MCP server for AI agent integration.
+- Where is this symbol declared?
+- What calls it, reads it, writes it, or implements it?
+- What breaks if I change it?
+- Which entry points can reach this API, database write, cache access, or event publish?
+- Which files, modules, and concepts should I inspect before editing?
 
-> **1,991 Swift files — 131K nodes — 784K edges — 8.7 seconds.** Zero-copy binary FFI. Lock-free parallel extraction. No serde on the hot path.
+Grapha does not treat source as plain text. For Swift, it reads Xcode's pre-built index store through binary FFI when available, then falls back through SwiftSyntax and tree-sitter. For Rust, it uses a dedicated tree-sitter extractor with Cargo workspace awareness. Other supported languages use best-effort tree-sitter extraction for symbols, containment, imports, and name-based relationships.
+
+> Benchmark: 1,991 Swift files, about 300K lines, 131K nodes, and 784K edges indexed in 8.7 seconds on a production iOS app.
 
 ## Why Grapha
 
-| | Grapha |
-|---|---|
-| **Parsing** | Compiler index store (confidence 1.0) + tree-sitter fallback |
-| **Relationship types** | 10 (calls, reads, writes, publishes, subscribes, inherits, implements, contains, type_ref, uses) |
-| **Dataflow tracing** | Forward (entry → terminals) + reverse (symbol → entries) |
-| **Code quality** | Complexity analysis, smell detection, module coupling metrics |
-| **Confidence scores** | Per-edge 0.0–1.0 |
-| **Terminal classification** | Auto-detects network, persistence, cache, event, keychain, search |
-| **MCP tools** | 17 |
-| **Watch mode** | File watcher with debounced incremental re-index |
-| **Recall** | Session disambiguation — ambiguous symbols auto-resolve after first use |
-
-## Performance
-
-Benchmarked on a production iOS app (1,991 Swift files, ~300K lines):
-
-| Phase | Time |
-|-------|------|
-| Extraction (index store + tree-sitter enrichment) | **3.5s** |
-| Merge (module-aware cross-file resolution) | 0.3s |
-| Classification (entry points + terminals) | 1.7s |
-| SQLite persistence (deferred indexing) | 2.0s |
-| Search index (BM25 via tantivy) | 1.0s |
-| **Total** | **8.7s** |
-
-**Graph:** 131,185 nodes · 783,793 edges · 2,983 entry points · 11,149 terminal operations
-
-**Why it's fast:** zero-copy index store FFI via pointer arithmetic (no serde), lock-free rayon extraction, single shared tree-sitter parse, marker-based enrichment skip, deferred SQLite indexing, USR-scoped edge resolution. Run `grapha index --timing` for a per-phase breakdown.
+| Need | Grapha answer |
+|------|---------------|
+| High-confidence Swift relationships | Xcode index store USRs when available, with confidence-scored graph edges |
+| Fast fallback parsing | SwiftSyntax and bundled tree-sitter paths for useful results without a successful build |
+| Agent-ready context | CLI output plus MCP tools for search, context, impact, dataflow, smells, and concepts |
+| Change planning | Impact analysis, reverse traces to entry points, repo changes, and architecture checks |
+| Product vocabulary | Concept lookup across bindings, aliases, localization strings, assets, and symbols |
+| Local-first workflow | Persistent `.grapha/` store, incremental indexing, watch mode, and local annotation sync |
 
 ## Install
 
@@ -53,10 +39,10 @@ cargo install grapha
 ## Quick Start
 
 ```bash
-# Index a project (incremental by default)
+# Build or refresh the project graph
 grapha index .
 
-# Check index freshness
+# Check whether the stored graph is fresh
 grapha repo status
 
 # Search symbols
@@ -64,53 +50,134 @@ grapha symbol search "ViewModel" --kind struct --context --fields full
 grapha symbol search "send" --kind function --module Room --fuzzy --declarations-only
 grapha symbol search "ProfileAPI" --repo FrameUI --fields file,repo,locator
 
-# 360° context — callers, callees, reads, implements
+# Inspect a symbol neighborhood
 grapha symbol context RoomPage --format tree
-grapha symbol context RoomPage --format brief
+grapha symbol context File.swift::helper --fields full
 
-# Impact analysis — what breaks if this changes?
+# Estimate blast radius before changing code
 grapha symbol impact GiftPanelViewModel --depth 2 --format tree
 
-# Complexity analysis — structural health of a type
-grapha symbol complexity RoomPage
-
-# Dataflow: entry point → terminal operations
+# Trace forward to terminal operations or backward to entry points
 grapha flow trace RoomPage --format tree
-
-# Reverse: which entry points reach this symbol?
 grapha flow trace sendGift --direction reverse
-
-# Origin tracing: which API/data source feeds this UI?
 grapha flow origin UserProfileView --terminal-kind network --format tree
 
-# Code smell detection
-grapha repo smells --module Room
-grapha repo smells --file Modules/Room/Sources/Room/View/RoomPage+Layout.swift
-grapha repo smells --symbol RoomPageCenterContentView --no-cache
-
-# Module metrics — symbol counts, coupling ratios
+# Scan repository health
+grapha repo smells --module Room --format brief
 grapha repo modules
-
-# Architecture guard — configured layer dependency rules
 grapha repo arch --format brief
 
-# Business concept lookup
+# Find code by product language
 grapha concept search "送礼横幅" --format tree
 grapha concept bind "送礼横幅" --symbol GiftBannerPage --symbol GiftBannerViewModel
 
-# MCP server for AI agents (with auto-refresh)
+# Serve Grapha to AI agents through MCP
 grapha serve --mcp --watch
 ```
 
-## MCP Server — 17 Tools for AI Agents
+## CLI Guide
+
+### Indexing and Serving
 
 ```bash
-grapha serve --mcp              # JSON-RPC over stdio
-grapha serve --mcp --watch      # + auto-refresh on file changes
-grapha index . && grapha serve --mcp --watch
+grapha index <path> [--format sqlite|json] [--store-dir DIR] [--full-rebuild] [--timing]
+grapha migrate [-p PATH] [--from OTHER_WORKTREE_OR_STORE] [--force]
+grapha analyze <path> [--output FILE] [--compact] [--filter fn,struct]
+grapha serve [-p PATH] [--mcp] [--watch[=true|false]] [--host HOST] [--port N]
 ```
 
-Add to `.mcp.json`:
+- `index` is the normal entry point. It stores graph data, search data, localization snapshots, asset snapshots, and freshness metadata under `.grapha/` by default.
+- `migrate` bootstraps a worktree from another local Grapha store so a fresh branch can answer queries before a full rebuild.
+- `analyze` emits an immediate graph for one-off inspection.
+- `serve` runs either the HTTP graph explorer or an MCP server over stdio.
+
+### Symbol Intelligence
+
+```bash
+grapha symbol search "query" [--limit N] [--kind K] [--module M] [--repo R] [--file GLOB] [--role ROLE]
+grapha symbol search "query" [--fuzzy] [--exact-name] [--declarations-only] [--public-only]
+grapha symbol search "query" [--context] [--fields file,id,locator,module,repo,snippet]
+grapha symbol context <symbol> [--format json|tree|brief] [--fields full] [--limit N]
+grapha symbol impact <symbol> [--depth N] [--format json|tree|brief] [--fields file,module,repo] [--limit N]
+grapha symbol complexity <symbol>
+grapha symbol file <path>
+grapha symbol annotate <symbol> "note" [--by agent]
+grapha symbol annotation <symbol>
+```
+
+Use exact IDs, locators, or disambiguating forms such as `File.swift::helper` when multiple symbols share a name. Tree and brief formats are meant for humans; JSON is stable for scripts and agents.
+
+### Dataflow
+
+```bash
+grapha flow trace <symbol> [--direction forward|reverse] [--depth N] [--format json|tree|brief]
+grapha flow graph <symbol> [--depth N] [--format json|tree]
+grapha flow origin <symbol> [--terminal-kind network|persistence|cache|event|keychain|search]
+grapha flow entries [--module M] [--file PATH] [--limit N] [--format json|tree]
+```
+
+Forward traces start from an entry point or symbol and look for terminal operations. Reverse traces start from a symbol or terminal and find entry points that can reach it. Origin tracing is tuned for UI-to-data-source questions such as "which API feeds this screen?"
+
+### Repository Health
+
+```bash
+grapha repo status
+grapha repo changes [unstaged|staged|all|REF] [--limit N]
+grapha repo map [--module M]
+grapha repo modules
+grapha repo smells [--module M | --file PATH | --symbol QUERY] [--format json|brief] [--no-cache]
+grapha repo arch [--format json|brief]
+grapha repo infer [--format json|brief]
+grapha repo doctor [--format json|brief]
+grapha repo history add --kind test --title "cargo test" [--file PATH] [--module M] [--symbol QUERY]
+grapha repo history list [--kind test] [--file PATH] [--module M] [--symbol QUERY] [--limit N]
+```
+
+These commands help orient in large repositories: freshness, file maps, module coupling, architecture rule violations, structural smells, inferred metadata health, and typed project history.
+
+### Concepts
+
+```bash
+grapha concept search "gift banner" [--limit N] [--format json|tree]
+grapha concept show "gift banner" [--format json|tree]
+grapha concept bind "gift banner" --symbol GiftBannerPage --symbol GiftBannerViewModel
+grapha concept alias "gift banner" --add "送礼横幅" --add "gift banner page"
+grapha concept remove "gift banner"
+grapha concept prune
+```
+
+Concept search combines confirmed bindings, aliases, localization text, asset names, and symbol search. Bindings are local project data, so agents can reuse product vocabulary after a human confirms it once.
+
+### Localization and Assets
+
+```bash
+grapha l10n symbol <symbol> [--format json|tree]
+grapha l10n usages <key> [--table TABLE] [--format json|tree]
+grapha asset list [--unused]
+grapha asset usages <name> [--format json|tree]
+```
+
+Localization queries connect SwiftUI symbol subtrees to strings and usage sites. Asset queries index `.xcassets` catalogs and source references.
+
+### Annotations
+
+```bash
+grapha annotation serve --port 8080
+grapha annotation list [-p PATH]
+grapha annotation sync [-p PATH]
+grapha annotation sync --server http://HOST:8080
+```
+
+Annotations are local-first notes scoped by project identity, not by branch. Project identity comes from `[repo].name`, Git metadata, or the project path fallback. Sync resolves the service address from `--server`, `GRAPHA_ANNOTATION_SERVER`, project `grapha.toml`, then global Grapha config.
+
+## MCP Server
+
+```bash
+grapha index .
+grapha serve --mcp --watch -p .
+```
+
+Add Grapha to an MCP client:
 
 ```json
 {
@@ -123,143 +190,58 @@ Add to `.mcp.json`:
 }
 ```
 
+Available MCP tools:
+
 | Tool | What it does |
-|------|-------------|
-| `search_symbols` | BM25 search with kind/module/file/role/fuzzy filters |
-| `get_index_status` | Index timestamp, repo snapshot metadata, and stale-result hints |
-| `get_symbol_context` | 360° view: callers, callees, reads, implements, contains tree |
-| `get_impact` | BFS blast radius at configurable depth |
-| `get_file_map` | File/symbol map organized by module and directory |
-| `trace` | Forward dataflow to terminals, or reverse to entry points |
-| `get_file_symbols` | All declarations in a file, by source position |
+|------|--------------|
+| `search_symbols` | BM25 symbol search with kind/module/file/role/fuzzy filters |
+| `get_index_status` | Index timestamp, repository snapshot metadata, and stale-result hints |
+| `get_symbol_context` | 360-degree symbol context: callers, callees, reads, implementors, containment |
+| `get_impact` | Blast radius analysis at configurable depth |
+| `get_file_map` | File and symbol map organized by module and directory |
+| `trace` | Forward dataflow to terminals or reverse dataflow to entry points |
+| `get_file_symbols` | All declarations in a file, ordered by source position |
 | `batch_context` | Context for up to 20 symbols in one call |
-| `analyze_complexity` | Structural metrics + severity rating for any type |
-| `detect_smells` | Code smell scan scoped to the repo, a module, a file, or a symbol |
-| `get_module_summary` | Per-module metrics with cross-module coupling ratio |
-| `search_concepts` | Fuzzy business concept lookup across bindings, localization, assets, and symbols |
+| `analyze_complexity` | Structural metrics and severity rating for a type |
+| `detect_smells` | Code smell scan scoped to repo, module, file, or symbol |
+| `get_module_summary` | Per-module metrics and cross-module coupling ratio |
+| `search_concepts` | Business concept lookup across bindings, localization, assets, and symbols |
 | `get_concept` | Stored concept aliases and bound symbols |
 | `bind_concept` | Persist confirmed concept-to-symbol mappings |
 | `add_concept_alias` | Add aliases for a concept |
 | `remove_concept` | Remove a concept from the project concept store |
-| `reload` | Hot-reload graph from disk without restarting the server |
+| `reload` | Reload graph data from disk without restarting the server |
 
-**Recall:** The MCP server remembers symbol resolutions within a session. If `helper` is ambiguous the first time, after you disambiguate with `File.swift::helper`, future bare `helper` queries resolve automatically. Use `reload` after a manual `grapha index` run when the server is not running with `--watch`.
-
-## Commands
-
-### Symbols
-
-```bash
-grapha symbol search "query" [--limit N] [--kind K] [--module M] [--repo R] [--file GLOB] [--role ROLE]
-grapha symbol search "query" [--fuzzy] [--exact-name] [--declarations-only] [--public-only]
-grapha symbol search "query" [--context] [--fields file,id,module,repo,snippet]
-grapha symbol context <symbol> [--format json|tree|brief] [--fields full]
-grapha symbol impact <symbol> [--depth N] [--format json|tree|brief] [--fields file,module,repo]
-grapha symbol complexity <symbol>          # property/method/dependency counts, severity
-grapha symbol file <path>                  # list declarations in a file
-```
-
-### Annotations
-
-```bash
-grapha annotation serve --port 8080                    # standalone LAN annotation service
-grapha annotation list                                 # local annotation records + project identity
-grapha annotation sync                                 # sync with configured annotation service
-grapha annotation sync --server http://HOST:8080       # explicit one-off service override
-```
-
-Annotation records are scoped by project id, not branch, so notes survive normal
-branch switches. The project id comes from `[repo].name`, Git remote/common-dir
-identity, or the project path fallback; set `[repo].name` for stable sync across
-non-Git copies. Existing branch-specific records remain readable and are
-normalized into project-scoped records on write/sync. `sync` resolves the service
-address from `--server`, `GRAPHA_ANNOTATION_SERVER`, project `grapha.toml`, then
-global Grapha config. `list` and `sync` use the current directory by default;
-pass `--path` only when operating on another project. `annotation serve` is not
-bound to a project and does not require `grapha index`; sync requests carry the
-project id used to route records into the right global annotation store.
-
-### Dataflow
-
-```bash
-grapha flow trace <symbol> [--direction forward|reverse] [--depth N] [--format json|tree|brief]
-grapha flow graph <symbol> [--depth N] [--format json|tree]       # semantic effect graph
-grapha flow origin <symbol> [--terminal-kind network|persistence|cache|event|keychain|search]
-grapha flow entries [--module M] [--file PATH] [--limit N] [--format json|tree]
-```
-
-### Repository
-
-```bash
-grapha repo status                         # index freshness and snapshot metadata
-grapha repo smells [--module M | --file PATH | --symbol QUERY] [--format json|brief] [--no-cache]
-grapha repo modules                        # per-module metrics
-grapha repo map [--module M]               # file/symbol overview
-grapha repo changes [unstaged|staged|all|REF]
-grapha repo arch [--format json|brief]     # configured architecture rule violations
-grapha repo infer [--format json|brief]    # opt-in inferred module/ownership/doc metadata
-grapha repo doctor [--format json|brief]   # graph and inferred metadata health checks
-grapha repo history add --kind test --title "cargo test" [--file PATH] [--module M] [--symbol QUERY]
-grapha repo history list [--kind test] [--file PATH] [--module M] [--symbol QUERY] [--limit N]
-```
-
-### Indexing & Serving
-
-```bash
-grapha index <path> [--format sqlite|json] [--store-dir DIR] [--full-rebuild] [--timing]
-grapha migrate [-p PATH] [--from OTHER_WORKTREE_OR_STORE] [--force]
-grapha analyze <path> [--compact] [--filter fn,struct]
-grapha serve [-p PATH] [--mcp] [--watch[=true|false]] [--host HOST] [--port N]
-```
-
-### Localization & Assets
-
-```bash
-grapha l10n symbol <symbol> [--format json|tree]
-grapha l10n usages <key> [--table T] [--format json|tree]
-grapha asset list [--unused]               # image assets from xcassets catalogs
-grapha asset usages <name> [--format json|tree]
-```
-
-### Concepts
-
-```bash
-grapha concept search "送礼横幅" [--limit N] [--format json|tree]   # fuzzy by default, limit defaults to 20
-grapha concept show "送礼横幅" [--format json|tree]
-grapha concept bind "送礼横幅" --symbol GiftBannerPage --symbol GiftBannerViewModel
-grapha concept alias "送礼横幅" --add "礼物 banner" --add "gift banner"
-grapha concept remove "送礼横幅"
-grapha concept prune                       # drop bindings to missing symbols
-```
+The MCP server remembers symbol resolutions within a session. If `helper` is ambiguous, disambiguating once with `File.swift::helper` lets later bare `helper` queries resolve to the same symbol. Use `reload` after a manual `grapha index .` when the server is not running with `--watch`.
 
 ## Configuration
 
-Optional `grapha.toml` at project root:
+Project configuration lives in an optional `grapha.toml` at the project root:
 
 ```toml
 [repo]
-name = "MobileApp"                         # defaults to the project directory name
+name = "MobileApp"
 
 [annotations]
-server = "http://192.168.1.10:8080"        # default for `grapha annotation sync`
+server = "http://192.168.1.10:8080"
 
 [serve]
-host = "0.0.0.0"                           # default bind host for `grapha serve`
-port = 18081                               # default HTTP port for this project
-watch = true                               # auto-refresh graph while serving
+host = "0.0.0.0"
+port = 18081
+watch = true
 
 [swift]
-index_store = true                         # false → tree-sitter only
+index_store = true
 
 [output]
 default_fields = ["file", "module", "repo"]
 
 [inferred]
-enabled = false                            # true enables `grapha repo infer`
+enabled = false
 
 [[external]]
 name = "FrameUI"
-path = "/path/to/local/frameui"            # include in cross-repo analysis
+path = "/path/to/local/frameui"
 
 [[architecture.layers]]
 name = "ui"
@@ -281,69 +263,72 @@ direction = "write"
 operation = "set"
 ```
 
-Global developer defaults can live in `$GRAPHA_CONFIG`,
-`$XDG_CONFIG_HOME/grapha/config.toml`, `~/.config/grapha/config.toml`, or
-`~/.grapha/config.toml`. Project `grapha.toml` overrides global config for
-repo-specific values such as `[annotations].server` and `[serve].port`.
+Global developer defaults can live in `$GRAPHA_CONFIG`, `$XDG_CONFIG_HOME/grapha/config.toml`, `~/.config/grapha/config.toml`, or `~/.grapha/config.toml`. Project config overrides global config for repository-specific values such as `[annotations].server` and `[serve].port`.
 
 ## Architecture
 
-```
-grapha-core/     Shared types (Node, Edge, Graph, ExtractionResult)
-grapha-rust/     Rust plugin and tree-sitter extractor
-grapha-swift/    Swift: index store → SwiftSyntax → tree-sitter waterfall
-grapha/          CLI, query engines, MCP server, web UI
-nodus/           Agent tooling package (skills, rules, commands)
-```
-
-### Extraction Waterfall (Swift)
-
-```
-Xcode Index Store (binary FFI)      → compiler-resolved USRs, confidence 1.0
-  ↓ fallback
-SwiftSyntax (JSON FFI)              → accurate parse, no type resolution, confidence 0.9
-  ↓ fallback
-tree-sitter-swift (bundled)         → fast, limited accuracy, confidence 0.6–0.8
+```text
+grapha-core/     Shared graph, extraction, semantic, selector, and plugin types
+grapha-rust/     Rust plugin and tree-sitter extractor package
+grapha-swift/    Swift extraction: index store -> SwiftSyntax -> tree-sitter
+grapha/          CLI binary, query engines, persistence, MCP server, and web UI
+nodus/           Agent tooling package with skills, rules, and commands
 ```
 
-After index store extraction, tree-sitter enriches doc comments, SwiftUI view hierarchy, and localization metadata in a single shared parse.
+### Swift Extraction Waterfall
+
+```text
+Xcode Index Store (binary FFI) -> compiler-resolved USRs, confidence 1.0
+  fallback
+SwiftSyntax (JSON FFI)         -> accurate parse, no type resolution, confidence 0.9
+  fallback
+tree-sitter-swift              -> fast parser fallback, confidence 0.6-0.8
+```
+
+After index store extraction, tree-sitter enriches doc comments, SwiftUI view hierarchy, localization metadata, and asset references in a shared parse.
 
 ### Graph Model
 
-**16 node kinds:** function, class, struct, enum, trait, impl, module, field, variant, property, constant, type_alias, protocol, extension, view, branch
+- Node kinds include files, functions, methods, types, modules, imports/exports, routes, components, Swift protocols/extensions, SwiftUI view nodes, and branch nodes.
+- Edge kinds include calls, uses, imports, exports, implements, contains, type references, reads, writes, publishes, subscribes, inherits, extends, instantiates, overrides, decorates, returns, and references.
+- Dataflow annotations track direction, operation, condition, async boundary, and source provenance.
+- Node roles distinguish entry points, terminal operations, and internal symbols.
+- Terminal kinds are `network`, `persistence`, `cache`, `event`, `keychain`, and `search`.
 
-**10 edge kinds:** calls, implements, inherits, contains, type_ref, uses, reads, writes, publishes, subscribes
+## Performance
 
-**Dataflow annotations:** direction (read/write/pure), operation (fetch/save/publish), condition, async_boundary, provenance (source file + span)
+Benchmarked on a production iOS app with 1,991 Swift files and about 300K lines:
 
-**Node roles:** entry_point (SwiftUI View, @Observable, fn main, #[test]) · terminal (network, persistence, cache, event, keychain, search)
+| Phase | Time |
+|-------|------|
+| Extraction, including index store and tree-sitter enrichment | 3.5s |
+| Merge and module-aware cross-file resolution | 0.3s |
+| Entry point and terminal classification | 1.7s |
+| SQLite persistence with deferred indexing | 2.0s |
+| BM25 search index via Tantivy | 1.0s |
+| Total | 8.7s |
 
-### Nodus Package
-
-```bash
-nodus add wenext/grapha --adapter claude
-```
-
-Installs skills, rules, and slash commands (`/index`, `/search`, `/impact`, `/complexity`, `/smells`) for grapha-aware AI workflows.
+The resulting graph contained 131,185 nodes, 783,793 edges, 2,983 entry points, and 11,149 terminal operations. Use `grapha index . --timing` on your own project for a phase breakdown.
 
 ## Supported Languages
 
-| Language | Extraction | Type Resolution |
-|----------|-----------|----------------|
-| **Swift** | Index store + tree-sitter | Compiler-grade (USR) |
-| **Rust** | tree-sitter | Name-based |
-| TypeScript / TSX / JavaScript | best-effort tree-sitter | Name-based |
-| Python / Go / Java / C / C++ / C# | best-effort tree-sitter | Name-based |
-| PHP / Ruby / Kotlin / Dart / Pascal | best-effort tree-sitter | Name-based |
+| Language | Extraction | Type resolution |
+|----------|------------|-----------------|
+| Swift | Xcode index store, SwiftSyntax, tree-sitter | Compiler-grade USRs when index store is available |
+| Rust | Dedicated tree-sitter extractor | Name-based |
+| TypeScript / TSX / JavaScript | Generic tree-sitter extractor | Name-based |
+| Python / Go / Java / C / C++ / C# | Generic tree-sitter extractor | Name-based |
+| PHP / Ruby / Kotlin / Dart / Pascal | Generic tree-sitter extractor | Name-based |
 
-Swift and Rust remain first-class extractors. The additional languages share one generic tree-sitter path so they can provide useful graph coverage without pretending to have compiler-grade semantics.
+Swift and Rust are first-class extraction paths. Other languages provide useful structural coverage without claiming compiler-grade semantics.
 
 ## Development
 
 ```bash
 cargo build                    # Build all workspace crates
 cargo test                     # Run the workspace test suite
-cargo clippy && cargo fmt      # Lint + format
+cargo clippy                   # Lint
+cargo fmt -- --check           # Check formatting
 ```
 
 ## License
