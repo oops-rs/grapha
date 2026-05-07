@@ -563,6 +563,12 @@ pub fn search_filtered(
             Occur::Must,
             Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
         ));
+    } else {
+        let term = Term::from_field_text(fields.kind, "extension");
+        clauses.push((
+            Occur::MustNot,
+            Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
+        ));
     }
     if let Some(ref module_filter) = options.module {
         // Case-insensitive module matching: store a lowercased module field
@@ -1174,17 +1180,29 @@ mod tests {
     }
 
     #[test]
-    fn locator_search_prefers_concrete_type_over_extension_on_ties() {
+    fn search_hides_extension_symbols_unless_kind_filter_requests_them() {
         let dir = tempfile::tempdir().unwrap();
         let graph = make_locator_tiebreak_graph();
         let index = build_index(&graph, dir.path()).unwrap();
         let results =
             search_filtered(&index, "Hello.swift::Test", 10, &SearchOptions::default()).unwrap();
 
-        assert_eq!(
-            results.first().map(|result| result.kind.as_str()),
-            Some("class")
-        );
+        assert!(results.iter().any(|result| result.kind == "class"));
+        assert!(results.iter().all(|result| result.kind != "extension"));
+
+        let extension_results = search_filtered(
+            &index,
+            "Hello.swift::Test",
+            10,
+            &SearchOptions {
+                kind: Some("extension".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(extension_results.len(), 1);
+        assert_eq!(extension_results[0].kind, "extension");
     }
 
     #[test]
