@@ -9,6 +9,7 @@ use grapha_core::graph::{Edge, EdgeKind, Graph, Node, NodeKind};
 
 use crate::annotations::AnnotationIndex;
 use crate::assets::{self, AssetCatalogIndex, AssetRecord};
+use crate::fields::FieldSet;
 use crate::localization::{LocalizationCatalogIndex, LocalizationCatalogRecord};
 use crate::query::{self, SymbolInfo};
 use crate::search::{self, SearchOptions};
@@ -91,6 +92,53 @@ pub struct ConceptScopeMatch {
     pub score: f32,
     pub status: String,
     pub evidence: Vec<ConceptEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProjectedConceptSearchResult {
+    pub query: String,
+    pub resolved_from: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_concept: Option<String>,
+    pub scopes: Vec<ProjectedConceptScopeMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProjectedConceptScopeMatch {
+    pub symbol: ProjectedConceptSymbol,
+    pub score: f32,
+    pub status: String,
+    pub evidence: Vec<ConceptEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProjectedConceptSymbol {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locator: Option<String>,
+    pub name: String,
+    pub kind: NodeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<[usize; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<grapha_core::graph::Visibility>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<grapha_core::graph::NodeRole>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_comment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<crate::annotations::SymbolAnnotationView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -741,6 +789,78 @@ pub fn search_concepts_with_annotations(
         matched_concept: None,
         scopes: matches,
     })
+}
+
+pub fn project_concept_search_result(
+    result: &ConceptSearchResult,
+    fields: FieldSet,
+) -> ProjectedConceptSearchResult {
+    ProjectedConceptSearchResult {
+        query: result.query.clone(),
+        resolved_from: result.resolved_from.clone(),
+        matched_concept: result.matched_concept.clone(),
+        scopes: result
+            .scopes
+            .iter()
+            .map(|scope| ProjectedConceptScopeMatch {
+                symbol: project_concept_symbol(&scope.symbol, fields),
+                score: scope.score,
+                status: scope.status.clone(),
+                evidence: scope.evidence.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn project_concept_symbol(symbol: &SymbolInfo, fields: FieldSet) -> ProjectedConceptSymbol {
+    ProjectedConceptSymbol {
+        id: fields.id.then(|| symbol.id.clone()),
+        locator: if fields.locator {
+            symbol.locator.clone()
+        } else {
+            None
+        },
+        name: symbol.name.clone(),
+        kind: symbol.kind,
+        file: fields.file.then(|| symbol.file.clone()),
+        span: fields.span.then_some(symbol.span),
+        visibility: fields.visibility.then_some(symbol.visibility).flatten(),
+        role: if fields.role {
+            symbol.role.clone()
+        } else {
+            None
+        },
+        signature: if fields.signature {
+            symbol.signature.clone()
+        } else {
+            None
+        },
+        doc_comment: if fields.doc_comment {
+            symbol.doc_comment.clone()
+        } else {
+            None
+        },
+        annotation: if fields.annotation {
+            symbol.annotation.clone()
+        } else {
+            None
+        },
+        module: if fields.module {
+            symbol.module.clone()
+        } else {
+            None
+        },
+        snippet: if fields.snippet {
+            symbol.snippet.clone()
+        } else {
+            None
+        },
+        repo: if fields.repo {
+            symbol.repo.clone()
+        } else {
+            None
+        },
+    }
 }
 
 fn direct_concept_scopes(
@@ -2510,6 +2630,49 @@ mod tests {
             "snippet concept matches should report compact snippet evidence: {:?}",
             result.scopes[0].evidence
         );
+    }
+
+    #[test]
+    fn project_concept_search_result_hides_file_and_span_when_unselected() {
+        let symbol = SymbolInfo {
+            id: "room-title".to_string(),
+            locator: Some("Room::Task.swift::titleStr".to_string()),
+            name: "titleStr".to_string(),
+            kind: NodeKind::Property,
+            file: "Task.swift".to_string(),
+            span: [42, 42],
+            visibility: Some(Visibility::Public),
+            role: None,
+            signature: None,
+            doc_comment: Some("Task title".to_string()),
+            annotation: None,
+            module: Some("Room".to_string()),
+            snippet: Some("var titleStr: String".to_string()),
+            repo: Some("lama-ludo-ios".to_string()),
+        };
+        let result = ConceptSearchResult {
+            query: "task title".to_string(),
+            resolved_from: "heuristics".to_string(),
+            matched_concept: None,
+            scopes: vec![ConceptScopeMatch {
+                symbol,
+                score: 1.0,
+                status: STATUS_CANDIDATE.to_string(),
+                evidence: Vec::new(),
+            }],
+        };
+
+        let projected = project_concept_search_result(
+            &result,
+            crate::fields::FieldSet::all().without_file().without_span(),
+        );
+        let payload = serde_json::to_value(&projected).unwrap();
+        let symbol = &payload["scopes"][0]["symbol"];
+
+        assert!(symbol.get("file").is_none());
+        assert!(symbol.get("span").is_none());
+        assert_eq!(symbol["id"], "room-title");
+        assert_eq!(symbol["snippet"], "var titleStr: String");
     }
 
     #[test]

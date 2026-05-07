@@ -96,6 +96,20 @@ fn resolve_search_field_set(fields_flag: &Option<String>, path: &Path) -> fields
     }
 }
 
+fn resolve_concept_search_field_set(fields_flag: &Option<String>, path: &Path) -> fields::FieldSet {
+    match fields_flag {
+        Some(_) => resolve_field_set(fields_flag, path),
+        None => {
+            let cfg = config::load_config(path);
+            if cfg.output.default_fields.is_empty() {
+                fields::FieldSet::all().without_file().without_span()
+            } else {
+                fields::FieldSet::from_config(&cfg.output.default_fields)
+            }
+        }
+    }
+}
+
 pub(crate) fn tree_render_options(color: ColorMode) -> render::RenderOptions {
     use std::io::IsTerminal;
 
@@ -703,7 +717,8 @@ pub(crate) fn handle_concept_command(
             format,
             fields,
         } => {
-            let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
+            let field_set = resolve_concept_search_field_set(&fields, &path);
+            let render_options = render_options.with_fields(field_set);
             let graph = load_graph(&path)?;
             let search_index = open_search_index(&path)?;
             let concept_index = concepts::load_concept_index(&path)?;
@@ -722,12 +737,18 @@ pub(crate) fn handle_concept_command(
                 limit,
                 annotations.as_ref(),
             )?;
-            print_query_result(
-                &result,
-                format,
-                render_options,
-                render::render_concept_search_with_options,
-            )
+            match format {
+                QueryOutputFormat::Json => {
+                    print_json(&concepts::project_concept_search_result(&result, field_set))
+                }
+                QueryOutputFormat::Tree => {
+                    println!(
+                        "{}",
+                        render::render_concept_search_with_options(&result, render_options)
+                    );
+                    Ok(())
+                }
+            }
         }
         ConceptCommands::Show {
             term,
@@ -1033,7 +1054,7 @@ fn parse_history_metadata(values: Vec<String>) -> anyhow::Result<BTreeMap<String
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_search_field_set;
+    use super::{resolve_concept_search_field_set, resolve_search_field_set};
 
     #[test]
     fn default_symbol_search_fields_include_doc_comment() {
@@ -1058,5 +1079,32 @@ mod tests {
         assert!(fields.id);
         assert!(!fields.doc_comment);
         assert!(!fields.annotation);
+    }
+
+    #[test]
+    fn default_concept_search_fields_hide_file_and_span() {
+        let project = tempfile::tempdir().unwrap();
+
+        let fields = resolve_concept_search_field_set(&None, project.path());
+
+        assert!(!fields.file);
+        assert!(!fields.span);
+        assert!(fields.id);
+        assert!(fields.locator);
+        assert!(fields.snippet);
+        assert!(fields.doc_comment);
+    }
+
+    #[test]
+    fn explicit_concept_search_fields_are_respected() {
+        let project = tempfile::tempdir().unwrap();
+
+        let fields =
+            resolve_concept_search_field_set(&Some("name,file,span".to_string()), project.path());
+
+        assert!(fields.file);
+        assert!(fields.span);
+        assert!(!fields.id);
+        assert!(!fields.snippet);
     }
 }

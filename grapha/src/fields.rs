@@ -65,6 +65,11 @@ impl FieldSet {
         self
     }
 
+    pub fn without_span(mut self) -> Self {
+        self.span = false;
+        self
+    }
+
     pub fn all() -> Self {
         Self {
             score: true,

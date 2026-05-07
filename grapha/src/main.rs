@@ -628,7 +628,7 @@ enum ConceptCommands {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
-        /// Fields to display in tree output (comma-separated: file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or "full"/"all"/"none")
+        /// Fields to display (comma-separated: file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or "full"/"all"/"none")
         #[arg(long)]
         fields: Option<String>,
     },

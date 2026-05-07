@@ -292,9 +292,15 @@ impl<'a> LineIndex<'a> {
         kind: NodeKind,
     ) -> Option<String> {
         let preferred_line = span.start[0];
-        let symbol = symbol_name
+        let accessor_symbol = symbol_name
             .strip_prefix("getter:")
-            .or_else(|| symbol_name.strip_prefix("setter:"))
+            .or_else(|| symbol_name.strip_prefix("setter:"));
+        let snippet_kind = if accessor_symbol.is_some() {
+            NodeKind::Property
+        } else {
+            kind
+        };
+        let symbol = accessor_symbol
             .unwrap_or(symbol_name)
             .split('(')
             .next()
@@ -330,24 +336,30 @@ impl<'a> LineIndex<'a> {
             push_unique_candidate(&mut candidates, candidate);
         }
 
-        if let Some(best) = best_snippet_candidate(&candidates, symbol, kind, preferred_line) {
-            let best_score = Self::score_candidate(&best, symbol, kind, preferred_line);
-            if is_sufficient_snippet_match(&best_score, kind) {
+        if let Some(best) =
+            best_snippet_candidate(&candidates, symbol, snippet_kind, preferred_line)
+        {
+            let best_score = Self::score_candidate(&best, symbol, snippet_kind, preferred_line);
+            if is_sufficient_snippet_match(&best_score, snippet_kind) {
                 return Some(trim_snippet_indentation(&best.snippet));
             }
         }
 
-        if let Some(candidate) = self.declaration_block_for_symbol(symbol, kind, preferred_line) {
+        if let Some(candidate) =
+            self.declaration_block_for_symbol(symbol, snippet_kind, preferred_line)
+        {
             push_unique_candidate(&mut candidates, candidate);
-            if let Some(best) = best_snippet_candidate(&candidates, symbol, kind, preferred_line) {
-                let best_score = Self::score_candidate(&best, symbol, kind, preferred_line);
-                if is_sufficient_snippet_match(&best_score, kind) {
+            if let Some(best) =
+                best_snippet_candidate(&candidates, symbol, snippet_kind, preferred_line)
+            {
+                let best_score = Self::score_candidate(&best, symbol, snippet_kind, preferred_line);
+                if is_sufficient_snippet_match(&best_score, snippet_kind) {
                     return Some(trim_snippet_indentation(&best.snippet));
                 }
             }
         }
 
-        self.declaration_line_for_symbol(symbol, kind, preferred_line)
+        self.declaration_line_for_symbol(symbol, snippet_kind, preferred_line)
             .map(|candidate| trim_snippet_indentation(&candidate.snippet))
     }
 
@@ -581,6 +593,21 @@ mod tests {
         assert_eq!(
             index.extract_symbol_snippet(&span, "newUserRoomTask", NodeKind::Variant),
             Some("case newUserRoomTask = 11".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_symbol_snippet_keeps_accessor_properties_to_one_line() {
+        let source = "struct Bonus {\n    var currencyValue: Int64 = 0  //待领取的金币数值\n    var totalCurrencyValue: Int64 = 0  //总共积累的金币数值\n    var rule: String = \"\"  //阿拉丁神灯规则\n}\nenum EntranceStatus: Int, Codable {\n    case unknown\n    case newRoom = 1  //新房主任务\n}\n";
+        let index = LineIndex::new(source);
+        let span = Span {
+            start: [1, 4],
+            end: [1, 4],
+        };
+
+        assert_eq!(
+            index.extract_symbol_snippet(&span, "getter:currencyValue", NodeKind::Function),
+            Some("var currencyValue: Int64 = 0  //待领取的金币数值".to_string())
         );
     }
 
