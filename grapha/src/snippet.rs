@@ -1,5 +1,7 @@
 use grapha_core::graph::{NodeKind, Span};
 
+const MAX_COMPACT_SYMBOL_SNIPPET_CHARS: usize = 600;
+
 #[cfg(test)]
 use std::cell::Cell;
 
@@ -41,6 +43,26 @@ pub fn trim_snippet_indentation(snippet: &str) -> String {
         .join("\n")
         .trim_matches('\n')
         .to_string()
+}
+
+pub fn compact_symbol_snippet(snippet: &str) -> String {
+    let deindented = trim_snippet_indentation(snippet);
+    let compact = deindented
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if compact.len() <= MAX_COMPACT_SYMBOL_SNIPPET_CHARS {
+        return compact;
+    }
+
+    let mut truncate_at = MAX_COMPACT_SYMBOL_SNIPPET_CHARS;
+    while !compact.is_char_boundary(truncate_at) {
+        truncate_at -= 1;
+    }
+    format!("{} ...", compact[..truncate_at].trim_end())
 }
 
 /// Pre-computed line index for a source file. Build once, query many times.

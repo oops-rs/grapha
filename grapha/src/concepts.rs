@@ -12,6 +12,7 @@ use crate::assets::{self, AssetCatalogIndex, AssetRecord};
 use crate::localization::{LocalizationCatalogIndex, LocalizationCatalogRecord};
 use crate::query::{self, SymbolInfo};
 use crate::search::{self, SearchOptions};
+use crate::snippet::compact_symbol_snippet;
 use crate::symbol_locator::SymbolLocatorIndex;
 
 const CONCEPTS_SNAPSHOT_VERSION: &str = "1";
@@ -36,6 +37,7 @@ const SCORE_FALLBACK_SEED_PENALTY: f32 = 25.0;
 const SCORE_SYMBOL_EXACT: f32 = 660.0;
 const SCORE_SYMBOL_PREFIX: f32 = 620.0;
 const SCORE_SYMBOL_BM25: f32 = 560.0;
+const SCORE_SYMBOL_PRECISE_METADATA_BONUS: f32 = 10.0;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConceptRecord {
@@ -627,8 +629,9 @@ pub fn search_concepts_with_annotations(
     };
 
     if let Some((record, lookup)) = concepts.record_for_search_term(query) {
-        let scopes = direct_concept_scopes(record, &lookup, &node_index, &locators, limit);
+        let mut scopes = direct_concept_scopes(record, &lookup, &node_index, &locators, limit);
         if !scopes.is_empty() {
+            attach_scope_annotations(&mut scopes, &node_index, annotations);
             return Ok(ConceptSearchResult {
                 query: query.trim().to_string(),
                 resolved_from: "concept_store".to_string(),
@@ -710,7 +713,7 @@ pub fn search_concepts_with_annotations(
         &normalized_query,
         TextMatch::Fuzzy,
     );
-    add_annotation_scopes(&mut scopes, &scope_context, &normalized_query, query);
+    add_symbol_metadata_scopes(&mut scopes, &scope_context, &normalized_query, query);
     add_symbol_scopes(&mut scopes, &scope_context, query, limit)?;
 
     let mut matches: Vec<_> = scopes
@@ -722,6 +725,7 @@ pub fn search_concepts_with_annotations(
             evidence: scope.evidence,
         })
         .collect();
+    attach_scope_annotations(&mut matches, &node_index, annotations);
     matches.sort_by(|left, right| {
         right
             .score
@@ -987,47 +991,113 @@ fn add_asset_scopes(
     }
 }
 
-fn add_annotation_scopes(
+fn add_symbol_metadata_scopes(
     scopes: &mut HashMap<String, ScopeAccumulator>,
     context: &ScopeSearchContext<'_>,
     normalized_query: &str,
     raw_query: &str,
 ) {
-    let Some(annotations) = context.annotations else {
+    for node in &context.graph.nodes {
+        add_symbol_text_scope(
+            scopes,
+            context,
+            node,
+            "doc_comment",
+            node.doc_comment.as_deref(),
+            normalized_query,
+            raw_query,
+            |value| value.to_string(),
+            || Some(node.name.clone()),
+        );
+        add_symbol_text_scope(
+            scopes,
+            context,
+            node,
+            "snippet",
+            should_match_concept_snippet(node.kind)
+                .then_some(node.snippet.as_deref())
+                .flatten(),
+            normalized_query,
+            raw_query,
+            compact_symbol_snippet,
+            || Some(node.name.clone()),
+        );
+        if let Some(annotation) = context
+            .annotations
+            .and_then(|index| index.get_for_node(node))
+        {
+            let note = if annotation.stale {
+                format!("{} (stale)", node.name)
+            } else {
+                node.name.clone()
+            };
+            add_symbol_text_scope(
+                scopes,
+                context,
+                node,
+                "annotation",
+                Some(annotation.text.as_str()),
+                normalized_query,
+                raw_query,
+                |value| value.to_string(),
+                || Some(note.clone()),
+            );
+        }
+    }
+}
+
+fn add_symbol_text_scope<F, N>(
+    scopes: &mut HashMap<String, ScopeAccumulator>,
+    context: &ScopeSearchContext<'_>,
+    node: &Node,
+    kind: &str,
+    value: Option<&str>,
+    normalized_query: &str,
+    raw_query: &str,
+    source_value: F,
+    note: N,
+) where
+    F: Fn(&str) -> String,
+    N: Fn() -> Option<String>,
+{
+    let Some(value) = value else {
         return;
     };
+    let Some((match_kind, base_score)) = concept_doc_match(value, normalized_query) else {
+        return;
+    };
+    let score = match kind {
+        "doc_comment" | "annotation" => base_score + SCORE_SYMBOL_PRECISE_METADATA_BONUS,
+        _ => base_score,
+    };
+    add_scope(
+        scopes,
+        node,
+        context.locators,
+        score,
+        STATUS_CANDIDATE,
+        ConceptEvidence {
+            kind: kind.to_string(),
+            value: raw_query.trim().to_string(),
+            match_kind: match_kind.to_string(),
+            table: None,
+            key: None,
+            source_value: Some(source_value(value)),
+            ui_path: Vec::new(),
+            note: note(),
+        },
+    );
+}
 
-    for node in &context.graph.nodes {
-        let Some(annotation) = annotations.get_for_node(node) else {
-            continue;
-        };
-        let Some((match_kind, base_score)) = concept_doc_match(&annotation.text, normalized_query)
-        else {
-            continue;
-        };
-        let scope = scope_for_node(node, context.parents, context.node_index);
-        add_scope(
-            scopes,
-            scope,
-            context.locators,
-            base_score,
-            STATUS_CANDIDATE,
-            ConceptEvidence {
-                kind: "annotation".to_string(),
-                value: raw_query.trim().to_string(),
-                match_kind: match_kind.to_string(),
-                table: None,
-                key: None,
-                source_value: Some(annotation.text),
-                ui_path: Vec::new(),
-                note: Some(if annotation.stale {
-                    format!("{} (stale)", node.name)
-                } else {
-                    node.name.clone()
-                }),
-            },
-        );
-    }
+fn should_match_concept_snippet(kind: NodeKind) -> bool {
+    !matches!(
+        kind,
+        NodeKind::File
+            | NodeKind::Module
+            | NodeKind::Namespace
+            | NodeKind::Import
+            | NodeKind::Export
+    )
 }
 
 fn add_symbol_scopes(
@@ -1447,9 +1517,26 @@ fn first_scope_ancestor<'a>(
     None
 }
 
+fn attach_scope_annotations(
+    scopes: &mut [ConceptScopeMatch],
+    node_index: &HashMap<&str, &Node>,
+    annotations: Option<&AnnotationIndex>,
+) {
+    let Some(annotations) = annotations else {
+        return;
+    };
+    for scope in scopes {
+        let Some(node) = node_index.get(scope.symbol.id.as_str()).copied() else {
+            continue;
+        };
+        scope.symbol.annotation = annotations.get_for_node(node);
+    }
+}
+
 fn symbol_info(node: &Node, locators: &SymbolLocatorIndex) -> SymbolInfo {
     let locator = locators.locator_for_id(&node.id);
-    let info = SymbolInfo::from_node(node);
+    let mut info = SymbolInfo::from_node(node);
+    info.snippet = info.snippet.as_deref().map(compact_symbol_snippet);
     match locator {
         Some(locator) => info.with_locator(locator.to_string()),
         None => info,
@@ -2317,6 +2404,115 @@ mod tests {
     }
 
     #[test]
+    fn search_concepts_matches_cjk_symbol_doc_comments() {
+        let mut node = make_node(
+            "activity-task-code.newUserRoomTask",
+            "newUserRoomTask",
+            NodeKind::Variant,
+            "ActivityAPI.swift",
+        );
+        node.doc_comment = Some("/// 新用户房主任务?".into());
+        node.snippet = Some("case newUserRoomTask = 11".into());
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![node.clone()],
+            edges: Vec::new(),
+        };
+        let (_dir, search_index) = build_search_index(&graph);
+
+        let result = search_concepts(
+            &graph,
+            &search_index,
+            &ConceptIndex::default(),
+            &LocalizationCatalogIndex::default(),
+            &AssetCatalogIndex::default(),
+            "新用户房主任务",
+            5,
+        )
+        .unwrap();
+
+        assert_eq!(result.scopes[0].symbol.id, node.id);
+        assert_eq!(
+            result.scopes[0].symbol.doc_comment.as_deref(),
+            Some("/// 新用户房主任务?")
+        );
+        assert_eq!(
+            result.scopes[0].symbol.snippet.as_deref(),
+            Some("case newUserRoomTask = 11")
+        );
+        assert!(
+            result.scopes[0]
+                .evidence
+                .iter()
+                .any(|evidence| evidence.kind == "doc_comment"
+                    && matches!(evidence.match_kind.as_str(), "exact" | "contains")
+                    && evidence
+                        .source_value
+                        .as_deref()
+                        .is_some_and(|value| value.contains("新用户房主任务"))),
+            "CJK doc comment concept matches should report doc_comment evidence: {:?}",
+            result.scopes[0].evidence
+        );
+    }
+
+    #[test]
+    fn search_concepts_matches_symbol_snippets_and_compacts_output() {
+        let mut node = make_node(
+            "room-title",
+            "titleStr",
+            NodeKind::Property,
+            "MyRoomTaskView.swift",
+        );
+        node.snippet = Some(
+            r#"
+            private var titleStr: String {
+                if viewModel.activityType == .newUser {
+                    "新用户房主任务"
+                } else {
+                    "每日任务"
+                }
+            }
+            "#
+            .into(),
+        );
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![node.clone()],
+            edges: Vec::new(),
+        };
+        let (_dir, search_index) = build_search_index(&graph);
+
+        let result = search_concepts(
+            &graph,
+            &search_index,
+            &ConceptIndex::default(),
+            &LocalizationCatalogIndex::default(),
+            &AssetCatalogIndex::default(),
+            "新用户房主任务",
+            5,
+        )
+        .unwrap();
+
+        assert_eq!(result.scopes[0].symbol.id, node.id);
+        let snippet = result.scopes[0].symbol.snippet.as_deref().unwrap();
+        assert!(
+            !snippet.contains('\n'),
+            "snippet should be compact: {snippet}"
+        );
+        assert!(snippet.starts_with("private var titleStr: String {"));
+        assert!(
+            result.scopes[0].evidence.iter().any(|evidence| {
+                evidence.kind == "snippet"
+                    && evidence.source_value.as_deref().is_some_and(|value| {
+                        !value.contains('\n') && value.contains("新用户房主任务")
+                    })
+            }),
+            "snippet concept matches should report compact snippet evidence: {:?}",
+            result.scopes[0].evidence
+        );
+    }
+
+    #[test]
     fn search_concepts_matches_symbol_annotations() {
         let node = make_node(
             "gift-coordinator",
@@ -2354,6 +2550,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.scopes[0].symbol.id, node.id);
+        assert_eq!(
+            result.scopes[0]
+                .symbol
+                .annotation
+                .as_ref()
+                .map(|annotation| annotation.text.as_str()),
+            Some("Coordinates the gift handoff between catalog and checkout.")
+        );
         assert!(
             result.scopes[0]
                 .evidence

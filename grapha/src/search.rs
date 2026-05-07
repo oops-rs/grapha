@@ -11,12 +11,10 @@ use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 use crate::annotations::AnnotationIndex;
 use crate::delta::{EntitySyncStats, GraphDelta, SyncMode};
 use crate::fields::FieldSet;
-use crate::snippet::trim_snippet_indentation;
+use crate::snippet::compact_symbol_snippet;
 use crate::symbol_locator::SymbolLocatorIndex;
 use grapha_core::graph::{EdgeKind, Graph};
 use grapha_core::graph::{Node, NodeRole};
-
-const MAX_SEARCH_SNIPPET_CHARS: usize = 600;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
@@ -803,26 +801,6 @@ fn node_span_string(node: &Node) -> String {
     )
 }
 
-fn compact_search_snippet(snippet: &str) -> String {
-    let deindented = trim_snippet_indentation(snippet);
-    let compact = deindented
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    if compact.len() <= MAX_SEARCH_SNIPPET_CHARS {
-        return compact;
-    }
-
-    let mut truncate_at = MAX_SEARCH_SNIPPET_CHARS;
-    while !compact.is_char_boundary(truncate_at) {
-        truncate_at -= 1;
-    }
-    format!("{} ...", compact[..truncate_at].trim_end())
-}
-
 fn collect_graph_details<'a>(
     results: &[SearchResult],
     graph: &'a Graph,
@@ -919,7 +897,7 @@ pub fn project_results(
                 snippet: if fields.snippet {
                     details
                         .and_then(|details| details.node.snippet.as_deref())
-                        .map(compact_search_snippet)
+                        .map(compact_symbol_snippet)
                 } else {
                     None
                 },
@@ -1900,12 +1878,12 @@ mod tests {
             "work(); ".repeat(120)
         );
 
-        let compact = compact_search_snippet(&snippet);
+        let compact = compact_symbol_snippet(&snippet);
 
         assert!(!compact.chars().next().is_some_and(char::is_whitespace));
         assert!(!compact.contains('\n'));
         assert!(compact.starts_with("func load() { work();"));
         assert!(compact.ends_with("..."));
-        assert!(compact.len() <= MAX_SEARCH_SNIPPET_CHARS + 4);
+        assert!(compact.len() <= 604);
     }
 }
