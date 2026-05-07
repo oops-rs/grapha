@@ -436,6 +436,28 @@ pub(super) fn extract_swift_doc_comment(node: tree_sitter::Node, source: &[u8]) 
     }
 }
 
+pub(super) fn extract_swift_doc_comment_or_trailing_line_comment(
+    node: tree_sitter::Node,
+    source: &[u8],
+) -> Option<String> {
+    extract_swift_doc_comment(node, source)
+        .or_else(|| extract_trailing_swift_line_comment(node, source))
+}
+
+fn extract_trailing_swift_line_comment(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let start = node.end_byte();
+    if start >= source.len() {
+        return None;
+    }
+    let end = source[start..]
+        .iter()
+        .position(|byte| matches!(byte, b'\n' | b'\r'))
+        .map(|offset| start + offset)
+        .unwrap_or(source.len());
+    let suffix = std::str::from_utf8(&source[start..end]).ok()?.trim();
+    suffix.starts_with("//").then(|| suffix.to_string())
+}
+
 pub(super) fn parse_swift_attribute_name(text: &str) -> Option<String> {
     let trimmed = text.trim().trim_start_matches('@');
     let ident: String = trimmed

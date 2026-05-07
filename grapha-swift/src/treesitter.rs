@@ -88,7 +88,7 @@ mod tests {
             public enum Color {
                 /// Warm stop color.
                 case red
-                case green
+                case green // Cool stop color.
             }
             "#,
         );
@@ -101,6 +101,7 @@ mod tests {
 
         let green = find_node(&result, "green");
         assert_eq!(green.kind, NodeKind::Variant);
+        assert_eq!(green.doc_comment.as_deref(), Some("// Cool stop color."));
 
         assert!(has_edge(&result, &color.id, &red.id, EdgeKind::Contains));
         assert!(has_edge(&result, &color.id, &green.id, EdgeKind::Contains));
@@ -1580,6 +1581,7 @@ class GameManager {
         let source = br#"public enum ActivityTaskCode: Int {
     /// New user room owner task.
     case newUserRoomTask = 11
+    case newUser = 12 // New user owner task.
 }
 "#;
         // Simulate index-store output: correct symbol name and 1-based line,
@@ -1603,6 +1605,24 @@ class GameManager {
             snippet: None,
             repo: None,
         });
+        result.nodes.push(Node {
+            id: "s:ActivityTaskCode.newUser".into(),
+            kind: NodeKind::Variant,
+            name: "newUser".into(),
+            file: "ActivityAPI.swift".into(),
+            span: Span {
+                start: [4, 10],
+                end: [4, 10],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
+            snippet: None,
+            repo: None,
+        });
 
         enrich_doc_comments(source, &mut result).unwrap();
 
@@ -1614,6 +1634,11 @@ class GameManager {
         assert_eq!(
             task.doc_comment.as_deref(),
             Some("/// New user room owner task.")
+        );
+        let new_user = result.nodes.iter().find(|n| n.name == "newUser").unwrap();
+        assert_eq!(
+            new_user.doc_comment.as_deref(),
+            Some("// New user owner task.")
         );
     }
 

@@ -802,7 +802,7 @@ fn extract_enum_entries(
                 metadata: HashMap::new(),
                 role: None,
                 signature: None,
-                doc_comment: extract_swift_doc_comment(child, source),
+                doc_comment: extract_swift_doc_comment_or_trailing_line_comment(child, source),
                 module: None,
                 snippet: None,
                 repo: None,
@@ -1365,7 +1365,7 @@ fn collect_doc_comments(
         }
         "enum_entry" => {
             if let Some(name) = simple_identifier_text(node, source)
-                && let Some(doc) = extract_swift_doc_comment(node, source)
+                && let Some(doc) = extract_swift_doc_comment_or_trailing_line_comment(node, source)
             {
                 out.insert((name, node.start_position().row + 1), doc);
             }

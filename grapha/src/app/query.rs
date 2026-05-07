@@ -87,7 +87,11 @@ fn resolve_search_field_set(fields_flag: &Option<String>, path: &Path) -> fields
             } else {
                 fields::FieldSet::from_config(&cfg.output.default_fields)
             };
-            field_set.with_id().with_locator().with_annotation()
+            field_set
+                .with_id()
+                .with_locator()
+                .with_annotation()
+                .with_doc_comment()
         }
     }
 }
@@ -1025,4 +1029,34 @@ fn parse_history_metadata(values: Vec<String>) -> anyhow::Result<BTreeMap<String
         metadata.insert(key.to_string(), val.trim().to_string());
     }
     Ok(metadata)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_search_field_set;
+
+    #[test]
+    fn default_symbol_search_fields_include_doc_comment() {
+        let project = tempfile::tempdir().unwrap();
+
+        let fields = resolve_search_field_set(&None, project.path());
+
+        assert!(fields.id);
+        assert!(fields.locator);
+        assert!(fields.annotation);
+        assert!(fields.doc_comment);
+        assert!(!fields.file);
+        assert!(!fields.score);
+    }
+
+    #[test]
+    fn explicit_symbol_search_fields_do_not_force_doc_comment() {
+        let project = tempfile::tempdir().unwrap();
+
+        let fields = resolve_search_field_set(&Some("id".to_string()), project.path());
+
+        assert!(fields.id);
+        assert!(!fields.doc_comment);
+        assert!(!fields.annotation);
+    }
 }

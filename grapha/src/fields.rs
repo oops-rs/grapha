@@ -55,6 +55,11 @@ impl FieldSet {
         self
     }
 
+    pub fn with_doc_comment(mut self) -> Self {
+        self.doc_comment = true;
+        self
+    }
+
     pub fn without_file(mut self) -> Self {
         self.file = false;
         self
