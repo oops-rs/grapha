@@ -16,9 +16,28 @@ pub async fn get_graph(State(state): State<Arc<AppState>>) -> Json<serde_json::V
     Json(serde_json::to_value(&state.graph).unwrap_or_default())
 }
 
-pub async fn get_entries(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let result = query::entries::query_entries(&state.graph);
-    Json(serde_json::to_value(&result).unwrap_or_default())
+pub async fn get_entries(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ClusterParams>,
+) -> Json<serde_json::Value> {
+    let cluster_options = cluster_options_from_params(&params);
+    let result = if let Some(options) = cluster_options.as_ref() {
+        query::entries::query_entries_with_options(
+            &state.graph,
+            &query::entries::EntriesQueryOptions {
+                limit: Some(options.candidate_limit),
+                ..query::entries::EntriesQueryOptions::default()
+            },
+        )
+    } else {
+        query::entries::query_entries(&state.graph)
+    };
+    let value = if let Some(options) = cluster_options.as_ref() {
+        crate::cluster::entries_result(&result, options)
+    } else {
+        serde_json::to_value(&result).unwrap_or_default()
+    };
+    Json(value)
 }
 
 #[derive(Serialize)]
@@ -54,24 +73,73 @@ fn query_response<T: Serialize>(result: Result<T, query::QueryResolveError>) -> 
 pub async fn get_context(
     State(state): State<Arc<AppState>>,
     Path(symbol): Path<String>,
+    Query(params): Query<ClusterParams>,
 ) -> impl IntoResponse {
     let decoded = urlencoding::decode(&symbol).unwrap_or_default();
+    if let Some(options) = cluster_options_from_params(&params) {
+        let result = query::context::query_context_with_options(
+            &state.graph,
+            &decoded,
+            &query::context::ContextQueryOptions {
+                limit: options.candidate_limit,
+            },
+        );
+        return match result {
+            Ok(result) => Json(crate::cluster::context_result(
+                &result,
+                &state.graph,
+                &options,
+            ))
+            .into_response(),
+            Err(error) => query_response::<serde_json::Value>(Err(error)),
+        };
+    }
     query_response(query::context::query_context(&state.graph, &decoded))
 }
 
 pub async fn get_trace(
     State(state): State<Arc<AppState>>,
     Path(symbol): Path<String>,
+    Query(params): Query<ClusterParams>,
 ) -> impl IntoResponse {
     let decoded = urlencoding::decode(&symbol).unwrap_or_default();
+    if let Some(options) = cluster_options_from_params(&params) {
+        let result = query::trace::query_trace_with_options(
+            &state.graph,
+            &decoded,
+            10,
+            &query::trace::TraceQueryOptions {
+                limit: options.candidate_limit,
+            },
+        );
+        return match result {
+            Ok(result) => Json(crate::cluster::trace_result(&result, &options)).into_response(),
+            Err(error) => query_response::<serde_json::Value>(Err(error)),
+        };
+    }
     query_response(query::trace::query_trace(&state.graph, &decoded, 10))
 }
 
 pub async fn get_reverse(
     State(state): State<Arc<AppState>>,
     Path(symbol): Path<String>,
+    Query(params): Query<ClusterParams>,
 ) -> impl IntoResponse {
     let decoded = urlencoding::decode(&symbol).unwrap_or_default();
+    if let Some(options) = cluster_options_from_params(&params) {
+        let result = query::reverse::query_reverse_with_options(
+            &state.graph,
+            &decoded,
+            None,
+            &query::reverse::ReverseQueryOptions {
+                limit: options.candidate_limit,
+            },
+        );
+        return match result {
+            Ok(result) => Json(crate::cluster::reverse_result(&result, &options)).into_response(),
+            Err(error) => query_response::<serde_json::Value>(Err(error)),
+        };
+    }
     query_response(query::reverse::query_reverse(&state.graph, &decoded, None))
 }
 
@@ -110,16 +178,70 @@ pub struct SearchParams {
     #[serde(default)]
     pub context: bool,
     pub fields: Option<String>,
+    #[serde(flatten)]
+    pub cluster: ClusterParams,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ClusterParams {
+    #[serde(default)]
+    pub cluster: bool,
+    pub cluster_id: Option<String>,
+    #[serde(default = "default_cluster_page")]
+    pub cluster_page: usize,
+    #[serde(default = "default_cluster_per_page")]
+    pub cluster_per_page: usize,
+    #[serde(default = "default_cluster_candidate_limit")]
+    pub cluster_candidate_limit: usize,
+}
+
+impl Default for ClusterParams {
+    fn default() -> Self {
+        Self {
+            cluster: false,
+            cluster_id: None,
+            cluster_page: default_cluster_page(),
+            cluster_per_page: default_cluster_per_page(),
+            cluster_candidate_limit: default_cluster_candidate_limit(),
+        }
+    }
 }
 
 fn default_limit() -> usize {
     20
 }
 
+fn default_cluster_page() -> usize {
+    1
+}
+
+fn default_cluster_per_page() -> usize {
+    20
+}
+
+fn default_cluster_candidate_limit() -> usize {
+    200
+}
+
+fn cluster_options_from_params(params: &ClusterParams) -> Option<crate::cluster::ClusterOptions> {
+    params.cluster.then(|| {
+        crate::cluster::ClusterOptions::new(
+            params.cluster_id.clone(),
+            params.cluster_page,
+            params.cluster_per_page,
+            params.cluster_candidate_limit.max(1),
+        )
+    })
+}
+
 pub async fn get_search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> Json<serde_json::Value> {
+    let mut cluster_options = cluster_options_from_params(&params.cluster);
+    if let Some(options) = cluster_options.as_mut() {
+        options.candidate_limit = options.candidate_limit.max(params.limit);
+    }
     let options = crate::search::SearchOptions {
         kind: params.kind,
         module: params.module,
@@ -131,8 +253,12 @@ pub async fn get_search(
         declarations_only: params.declarations_only,
         public_only: params.public_only,
     };
+    let candidate_limit = cluster_options
+        .as_ref()
+        .map(|options| options.candidate_limit)
+        .unwrap_or(params.limit);
     let results =
-        crate::search::search_filtered(&state.search_index, &params.q, params.limit, &options)
+        crate::search::search_filtered(&state.search_index, &params.q, candidate_limit, &options)
             .unwrap_or_default();
     let fields = params
         .fields
@@ -160,11 +286,28 @@ pub async fn get_search(
         &state.project_path.join(".grapha"),
     )
     .ok();
-    Json(serde_json::json!({
-        "results": projected,
-        "total": results.len(),
-        "index_status": index_status
-    }))
+    if let Some(cluster_options) = cluster_options.as_ref() {
+        let raw_scores = results
+            .iter()
+            .map(|result| result.score)
+            .collect::<Vec<_>>();
+        Json(crate::cluster::search_items(
+            serde_json::json!({
+                "query": params.q,
+                "total": results.len(),
+                "index_status": index_status,
+            }),
+            &projected,
+            &raw_scores,
+            cluster_options,
+        ))
+    } else {
+        Json(serde_json::json!({
+            "results": projected,
+            "total": results.len(),
+            "index_status": index_status
+        }))
+    }
 }
 
 #[derive(Deserialize)]
@@ -548,6 +691,7 @@ mod tests {
                 public_only: false,
                 context: true,
                 fields: Some("id,signature,role,snippet".into()),
+                cluster: ClusterParams::default(),
             }),
         )
         .await;

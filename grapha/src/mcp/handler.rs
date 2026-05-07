@@ -10,7 +10,7 @@ use crate::query;
 use crate::recall::{self, Recall};
 use crate::search;
 use crate::store::Store;
-use crate::{annotations, assets, concepts, localization};
+use crate::{annotations, assets, cluster, concepts, localization};
 
 pub struct McpState {
     pub graph: Graph,
@@ -80,6 +80,30 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "fields": {
                         "type": "string",
                         "description": "Optional comma-separated projected fields to include (for example: score,id,locator,doc_comment,annotation,signature; or full/all/none)"
+                    },
+                    "cluster": {
+                        "type": "boolean",
+                        "description": "Return score-band clusters instead of the default list JSON",
+                        "default": false
+                    },
+                    "cluster_id": {
+                        "type": "string",
+                        "description": "Score-band cluster to page: excellent, strong, possible, weak, or unknown"
+                    },
+                    "cluster_page": {
+                        "type": "integer",
+                        "description": "1-based page within the selected cluster",
+                        "default": 1
+                    },
+                    "cluster_per_page": {
+                        "type": "integer",
+                        "description": "Items returned in the selected cluster page",
+                        "default": 20
+                    },
+                    "cluster_candidate_limit": {
+                        "type": "integer",
+                        "description": "Candidates fetched before score-band clustering",
+                        "default": 200
                     }
                 },
                 "required": ["query"]
@@ -102,6 +126,27 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "symbol": {
                         "type": "string",
                         "description": "Symbol name or ID"
+                    },
+                    "cluster": {
+                        "type": "boolean",
+                        "description": "Return score-band clusters for context list sections",
+                        "default": false
+                    },
+                    "cluster_id": {
+                        "type": "string",
+                        "description": "Score-band cluster to page: excellent, strong, possible, weak, or unknown"
+                    },
+                    "cluster_page": {
+                        "type": "integer",
+                        "default": 1
+                    },
+                    "cluster_per_page": {
+                        "type": "integer",
+                        "default": 20
+                    },
+                    "cluster_candidate_limit": {
+                        "type": "integer",
+                        "default": 200
                     }
                 },
                 "required": ["symbol"]
@@ -143,6 +188,27 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "integer",
                         "description": "Maximum traversal depth (default: 3)",
                         "default": 3
+                    },
+                    "cluster": {
+                        "type": "boolean",
+                        "description": "Return score-band clusters for impact depth buckets",
+                        "default": false
+                    },
+                    "cluster_id": {
+                        "type": "string",
+                        "description": "Score-band cluster to page: excellent, strong, possible, weak, or unknown"
+                    },
+                    "cluster_page": {
+                        "type": "integer",
+                        "default": 1
+                    },
+                    "cluster_per_page": {
+                        "type": "integer",
+                        "default": 20
+                    },
+                    "cluster_candidate_limit": {
+                        "type": "integer",
+                        "default": 200
                     }
                 },
                 "required": ["symbol"]
@@ -180,6 +246,27 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "depth": {
                         "type": "integer",
                         "description": "Maximum traversal depth (default: 10 for forward, unlimited for reverse)"
+                    },
+                    "cluster": {
+                        "type": "boolean",
+                        "description": "Return score-band clusters for trace flows or reverse entries",
+                        "default": false
+                    },
+                    "cluster_id": {
+                        "type": "string",
+                        "description": "Score-band cluster to page: excellent, strong, possible, weak, or unknown"
+                    },
+                    "cluster_page": {
+                        "type": "integer",
+                        "default": 1
+                    },
+                    "cluster_per_page": {
+                        "type": "integer",
+                        "default": 20
+                    },
+                    "cluster_candidate_limit": {
+                        "type": "integer",
+                        "default": 200
                     }
                 },
                 "required": ["symbol"]
@@ -195,6 +282,27 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "file": {
                         "type": "string",
                         "description": "File name or path suffix (e.g. \"RoomPage.swift\" or \"src/main.rs\")"
+                    },
+                    "cluster": {
+                        "type": "boolean",
+                        "description": "Return score-band clusters for file symbols",
+                        "default": false
+                    },
+                    "cluster_id": {
+                        "type": "string",
+                        "description": "Score-band cluster to page: excellent, strong, possible, weak, or unknown"
+                    },
+                    "cluster_page": {
+                        "type": "integer",
+                        "default": 1
+                    },
+                    "cluster_per_page": {
+                        "type": "integer",
+                        "default": 20
+                    },
+                    "cluster_candidate_limit": {
+                        "type": "integer",
+                        "default": 200
                     }
                 },
                 "required": ["file"]
@@ -246,6 +354,27 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "symbol": {
                         "type": "string",
                         "description": "Limit smell analysis to a specific symbol and its local neighborhood"
+                    },
+                    "cluster": {
+                        "type": "boolean",
+                        "description": "Return score-band clusters for smells",
+                        "default": false
+                    },
+                    "cluster_id": {
+                        "type": "string",
+                        "description": "Score-band cluster to page: excellent, strong, possible, weak, or unknown"
+                    },
+                    "cluster_page": {
+                        "type": "integer",
+                        "default": 1
+                    },
+                    "cluster_per_page": {
+                        "type": "integer",
+                        "default": 20
+                    },
+                    "cluster_candidate_limit": {
+                        "type": "integer",
+                        "default": 200
                     }
                 }
             }),
@@ -272,6 +401,30 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "integer",
                         "description": "Maximum number of scopes to return (default: 20)",
                         "default": 20
+                    },
+                    "cluster": {
+                        "type": "boolean",
+                        "description": "Return score-band clusters for concept scopes instead of the default result JSON",
+                        "default": false
+                    },
+                    "cluster_id": {
+                        "type": "string",
+                        "description": "Score-band cluster to page: excellent, strong, possible, weak, or unknown"
+                    },
+                    "cluster_page": {
+                        "type": "integer",
+                        "description": "1-based page within the selected cluster",
+                        "default": 1
+                    },
+                    "cluster_per_page": {
+                        "type": "integer",
+                        "description": "Items returned in the selected cluster page",
+                        "default": 20
+                    },
+                    "cluster_candidate_limit": {
+                        "type": "integer",
+                        "description": "Candidates fetched before score-band clustering",
+                        "default": 200
                     }
                 },
                 "required": ["query"]
@@ -403,6 +556,34 @@ fn serialize_result<T: serde::Serialize>(result: &T) -> Value {
     }
 }
 
+fn cluster_options_from_arguments(arguments: &Value) -> Option<cluster::ClusterOptions> {
+    arguments
+        .get("cluster")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        .then(|| {
+            cluster::ClusterOptions::new(
+                arguments
+                    .get("cluster_id")
+                    .and_then(|value| value.as_str())
+                    .map(String::from),
+                arguments
+                    .get("cluster_page")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(1) as usize,
+                arguments
+                    .get("cluster_per_page")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(20) as usize,
+                arguments
+                    .get("cluster_candidate_limit")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(200)
+                    .max(1) as usize,
+            )
+        })
+}
+
 pub fn handle_tool_call(state: &mut McpState, tool_name: &str, arguments: &Value) -> Value {
     match tool_name {
         "search_symbols" => handle_search_symbols(state, arguments),
@@ -446,6 +627,10 @@ fn handle_search_symbols(state: &McpState, arguments: &Value) -> Value {
         .get("limit")
         .and_then(|v| v.as_u64())
         .unwrap_or(20) as usize;
+    let mut cluster_options = cluster_options_from_arguments(arguments);
+    if let Some(options) = cluster_options.as_mut() {
+        options.candidate_limit = options.candidate_limit.max(limit);
+    }
     let options = search::SearchOptions {
         kind: arguments
             .get("kind")
@@ -489,7 +674,12 @@ fn handle_search_symbols(state: &McpState, arguments: &Value) -> Value {
         .and_then(|v| v.as_str())
         .map(FieldSet::parse);
 
-    match search::search_filtered(&state.search_index, query_str, limit, &options) {
+    let candidate_limit = cluster_options
+        .as_ref()
+        .map(|options| options.candidate_limit)
+        .unwrap_or(limit);
+
+    match search::search_filtered(&state.search_index, query_str, candidate_limit, &options) {
         Ok(results) => {
             if let Some(fields) = fields {
                 let graph =
@@ -501,15 +691,43 @@ fn handle_search_symbols(state: &McpState, arguments: &Value) -> Value {
                 } else {
                     None
                 };
-                serialize_result(&search::project_results(
-                    &results,
-                    graph,
-                    fields,
-                    false,
-                    annotations.as_ref(),
-                ))
+                let projected =
+                    search::project_results(&results, graph, fields, false, annotations.as_ref());
+                if let Some(cluster_options) = cluster_options.as_ref() {
+                    let raw_scores = results
+                        .iter()
+                        .map(|result| result.score)
+                        .collect::<Vec<_>>();
+                    serialize_result(&cluster::search_items(
+                        json!({
+                            "query": query_str,
+                            "total": results.len(),
+                        }),
+                        &projected,
+                        &raw_scores,
+                        cluster_options,
+                    ))
+                } else {
+                    serialize_result(&projected)
+                }
             } else {
-                serialize_result(&results)
+                if let Some(cluster_options) = cluster_options.as_ref() {
+                    let raw_scores = results
+                        .iter()
+                        .map(|result| result.score)
+                        .collect::<Vec<_>>();
+                    serialize_result(&cluster::search_items(
+                        json!({
+                            "query": query_str,
+                            "total": results.len(),
+                        }),
+                        &results,
+                        &raw_scores,
+                        cluster_options,
+                    ))
+                } else {
+                    serialize_result(&results)
+                }
             }
         }
         Err(e) => tool_error(format!("search failed: {e}")),
@@ -532,15 +750,32 @@ fn handle_get_symbol_context(state: &mut McpState, arguments: &Value) -> Value {
         Ok(id) => id,
         Err(e) => return e,
     };
+    let cluster_options = cluster_options_from_arguments(arguments);
 
-    match query::context::query_context(&state.graph, &symbol_id) {
+    let result = if let Some(options) = cluster_options.as_ref() {
+        query::context::query_context_with_options(
+            &state.graph,
+            &symbol_id,
+            &query::context::ContextQueryOptions {
+                limit: options.candidate_limit,
+            },
+        )
+    } else {
+        query::context::query_context(&state.graph, &symbol_id)
+    };
+
+    match result {
         Ok(mut result) => {
             if let Ok(annotations) =
                 annotations::AnnotationStore::for_project_root(&state.project_root).load_index()
             {
                 result.apply_annotations(&state.graph, &annotations);
             }
-            serialize_result(&result)
+            if let Some(options) = cluster_options.as_ref() {
+                serialize_result(&cluster::context_result(&result, &state.graph, options))
+            } else {
+                serialize_result(&result)
+            }
         }
         Err(e) => tool_error(format_query_error(&e)),
     }
@@ -586,9 +821,29 @@ fn handle_get_impact(state: &mut McpState, arguments: &Value) -> Value {
         Err(e) => return e,
     };
     let depth = arguments.get("depth").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+    let cluster_options = cluster_options_from_arguments(arguments);
 
-    match query::impact::query_impact(&state.graph, &symbol_id, depth) {
-        Ok(result) => serialize_result(&result),
+    let result = if let Some(options) = cluster_options.as_ref() {
+        query::impact::query_impact_with_options(
+            &state.graph,
+            &symbol_id,
+            depth,
+            &query::impact::ImpactQueryOptions {
+                limit: options.candidate_limit,
+            },
+        )
+    } else {
+        query::impact::query_impact(&state.graph, &symbol_id, depth)
+    };
+
+    match result {
+        Ok(result) => {
+            if let Some(options) = cluster_options.as_ref() {
+                serialize_result(&cluster::impact_result(&result, options))
+            } else {
+                serialize_result(&result)
+            }
+        }
         Err(e) => tool_error(format_query_error(&e)),
     }
 }
@@ -613,19 +868,56 @@ fn handle_trace(state: &mut McpState, arguments: &Value) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or("forward");
     let depth = arguments.get("depth").and_then(|v| v.as_u64());
+    let cluster_options = cluster_options_from_arguments(arguments);
 
     match direction {
         "forward" => {
             let max_depth = depth.unwrap_or(10) as usize;
-            match query::trace::query_trace(&state.graph, &symbol_id, max_depth) {
-                Ok(result) => serialize_result(&result),
+            let result = if let Some(options) = cluster_options.as_ref() {
+                query::trace::query_trace_with_options(
+                    &state.graph,
+                    &symbol_id,
+                    max_depth,
+                    &query::trace::TraceQueryOptions {
+                        limit: options.candidate_limit,
+                    },
+                )
+            } else {
+                query::trace::query_trace(&state.graph, &symbol_id, max_depth)
+            };
+            match result {
+                Ok(result) => {
+                    if let Some(options) = cluster_options.as_ref() {
+                        serialize_result(&cluster::trace_result(&result, options))
+                    } else {
+                        serialize_result(&result)
+                    }
+                }
                 Err(e) => tool_error(format_query_error(&e)),
             }
         }
         "reverse" => {
             let max_depth = depth.map(|d| d as usize);
-            match query::reverse::query_reverse(&state.graph, &symbol_id, max_depth) {
-                Ok(result) => serialize_result(&result),
+            let result = if let Some(options) = cluster_options.as_ref() {
+                query::reverse::query_reverse_with_options(
+                    &state.graph,
+                    &symbol_id,
+                    max_depth,
+                    &query::reverse::ReverseQueryOptions {
+                        limit: options.candidate_limit,
+                    },
+                )
+            } else {
+                query::reverse::query_reverse(&state.graph, &symbol_id, max_depth)
+            };
+            match result {
+                Ok(result) => {
+                    if let Some(options) = cluster_options.as_ref() {
+                        serialize_result(&cluster::reverse_result(&result, options))
+                    } else {
+                        serialize_result(&result)
+                    }
+                }
                 Err(e) => tool_error(format_query_error(&e)),
             }
         }
@@ -647,7 +939,11 @@ fn handle_get_file_symbols(state: &McpState, arguments: &Value) -> Value {
     if result.total == 0 {
         return tool_error(format!("no symbols found in file matching: {file}"));
     }
-    serialize_result(&result)
+    if let Some(options) = cluster_options_from_arguments(arguments).as_ref() {
+        serialize_result(&cluster::file_symbols_result(&result, options))
+    } else {
+        serialize_result(&result)
+    }
 }
 
 fn handle_batch_context(state: &mut McpState, arguments: &Value) -> Value {
@@ -741,7 +1037,11 @@ fn handle_detect_smells(state: &McpState, arguments: &Value) -> Value {
         query::smells::detect_smells(&state.graph)
     };
 
-    serialize_result(&result)
+    if let Some(options) = cluster_options_from_arguments(arguments).as_ref() {
+        serialize_result(&cluster::smells_result(&result, options))
+    } else {
+        serialize_result(&result)
+    }
 }
 
 fn handle_get_module_summary(state: &McpState) -> Value {
@@ -758,6 +1058,10 @@ fn handle_search_concepts(state: &McpState, arguments: &Value) -> Value {
         .get("limit")
         .and_then(|v| v.as_u64())
         .unwrap_or(concepts::DEFAULT_CONCEPT_SEARCH_LIMIT as u64) as usize;
+    let mut cluster_options = cluster_options_from_arguments(arguments);
+    if let Some(options) = cluster_options.as_mut() {
+        options.candidate_limit = options.candidate_limit.max(limit);
+    }
 
     let concept_index = match concepts::load_concept_index_from_store(&state.store_path) {
         Ok(index) => index,
@@ -777,10 +1081,19 @@ fn handle_search_concepts(state: &McpState, arguments: &Value) -> Value {
         &catalogs,
         &assets_index,
         query,
-        limit,
+        cluster_options
+            .as_ref()
+            .map(|options| options.candidate_limit)
+            .unwrap_or(limit),
         annotations.as_ref(),
     ) {
-        Ok(result) => serialize_result(&result),
+        Ok(result) => {
+            if let Some(options) = cluster_options.as_ref() {
+                serialize_result(&cluster::concept_search_full_result(&result, options))
+            } else {
+                serialize_result(&result)
+            }
+        }
         Err(error) => tool_error(format!("concept search failed: {error}")),
     }
 }

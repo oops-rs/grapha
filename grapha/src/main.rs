@@ -5,6 +5,7 @@ mod assets;
 mod cache;
 mod changes;
 mod classify;
+mod cluster;
 mod compress;
 mod concepts;
 mod config;
@@ -35,7 +36,7 @@ mod watch;
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -117,6 +118,25 @@ enum RepoDoctorOutputFormat {
 enum TraceDirection {
     Forward,
     Reverse,
+}
+
+#[derive(Clone, Debug, Default, Args)]
+struct ClusterArgs {
+    /// Return score-band clusters instead of the default list JSON
+    #[arg(long)]
+    cluster: bool,
+    /// Score-band cluster to page: excellent, strong, possible, weak, or unknown
+    #[arg(long)]
+    cluster_id: Option<String>,
+    /// 1-based page number within the selected cluster
+    #[arg(long, default_value = "1")]
+    cluster_page: usize,
+    /// Items returned in the selected cluster page
+    #[arg(long, default_value = "20")]
+    cluster_per_page: usize,
+    /// Candidates fetched before score-band clustering
+    #[arg(long, default_value = "200")]
+    cluster_candidate_limit: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -363,6 +383,8 @@ enum SymbolCommands {
         /// Fields to display (comma-separated: score,file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or "full"/"all"/"none")
         #[arg(long)]
         fields: Option<String>,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
     /// Query symbol context (callers, callees, implementors)
     #[command(
@@ -384,6 +406,8 @@ enum SymbolCommands {
         /// Limit items per result section (callers, callees, etc.). Pass a large value to disable.
         #[arg(long, default_value = "20")]
         limit: usize,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
     /// Analyze blast radius of changing a symbol
     #[command(
@@ -408,6 +432,8 @@ enum SymbolCommands {
         /// Limit items per depth bucket (depth_1, depth_2, depth_3_plus). Pass a large value to disable.
         #[arg(long, default_value = "20")]
         limit: usize,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
     /// Analyze structural complexity of a type (properties, dependencies, invalidation surface)
     Complexity {
@@ -424,6 +450,8 @@ enum SymbolCommands {
         /// Project directory
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
     /// Attach an agent-written annotation to a symbol
     Annotate {
@@ -476,6 +504,8 @@ enum FlowCommands {
         /// Limit flows (forward) or affected entries (reverse). Pass a large value to disable.
         #[arg(long, default_value = "20")]
         limit: usize,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
     /// Derive a semantic effect graph from a symbol
     Graph {
@@ -523,6 +553,8 @@ enum FlowCommands {
         /// Limit reported origins. Pass a large value to disable.
         #[arg(long, default_value = "20")]
         limit: usize,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
     /// List auto-detected entry points
     Entries {
@@ -544,6 +576,8 @@ enum FlowCommands {
         /// Fields to display in tree output (comma-separated: file; or "full"/"all"/"none")
         #[arg(long)]
         fields: Option<String>,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
 }
 
@@ -579,6 +613,8 @@ enum L10nCommands {
         /// Fields to display in tree output (comma-separated: file; or "full"/"all"/"none")
         #[arg(long)]
         fields: Option<String>,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
 }
 
@@ -631,6 +667,8 @@ enum ConceptCommands {
         /// Fields to display (comma-separated: file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or "full"/"all"/"none")
         #[arg(long)]
         fields: Option<String>,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
     /// Show a stored concept mapping and its bound symbols
     Show {
@@ -703,6 +741,8 @@ enum RepoCommands {
         /// Limit affected symbols and per-symbol impact buckets. Pass a large value to disable.
         #[arg(long, default_value = "20")]
         limit: usize,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
     /// Show file/symbol map for orientation in large projects
     Map {
@@ -725,6 +765,8 @@ enum RepoCommands {
         /// Output format
         #[arg(long, value_enum, default_value_t = RepoArchOutputFormat::Json)]
         format: RepoArchOutputFormat,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
     /// Detect code smells across the graph (god types, deep nesting, wide invalidation, etc.)
     #[command(
@@ -750,6 +792,8 @@ enum RepoCommands {
         /// Project directory
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
     /// Show per-module metrics (symbol counts, coupling, entry points)
     Modules {
@@ -765,6 +809,8 @@ enum RepoCommands {
         /// Project directory
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
+        #[command(flatten)]
+        cluster: ClusterArgs,
     },
     /// Check graph integrity, inferred links, and relation provenance
     Doctor {

@@ -22,6 +22,22 @@ fn run_git(cwd: &Path, args: &[&str]) {
     );
 }
 
+fn index_temp_rust_project(source: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(dir.path().join("main.rs"), source).unwrap();
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    dir
+}
+
 fn contains_file_named(root: &Path, file_name: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(root) else {
         return false;
@@ -962,6 +978,58 @@ fn repo_infer_brief_saves_opt_in_metadata() {
 }
 
 #[test]
+fn repo_infer_cluster_outputs_confidence_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    let feature_dir = dir.path().join("Features/Gifts");
+    std::fs::create_dir_all(&feature_dir).unwrap();
+    std::fs::write(
+        dir.path().join("grapha.toml"),
+        "[inferred]\nenabled = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        feature_dir.join("run.rs"),
+        "/// Starts the gift flow.\npub fn run() {}\n",
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = grapha()
+        .args([
+            "repo",
+            "infer",
+            "--cluster",
+            "--cluster-id",
+            "strong",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["result"]["enabled"], true);
+    assert_eq!(parsed["page"]["items"][0]["section"], "records");
+    assert_eq!(
+        parsed["page"]["items"][0]["score"]["source"],
+        "inferred_confidence"
+    );
+    assert_eq!(parsed["page"]["items"][0]["item"]["kind"], "doc_code_link");
+}
+
+#[test]
 fn repo_doctor_brief_reports_stale_inferred_links() {
     let dir = tempfile::tempdir().unwrap();
     let store_dir = dir.path().join(".grapha");
@@ -1204,6 +1272,334 @@ fn symbol_search_includes_id_by_default() {
     assert!(
         first.get("file").is_none(),
         "default search output should omit file because locator already identifies the symbol"
+    );
+}
+
+#[test]
+fn symbol_search_cluster_outputs_json_envelope_without_changing_default_shape() {
+    let dir = index_temp_rust_project("fn helper() {}\nfn main() { helper(); }\n");
+
+    let default_output = grapha()
+        .args([
+            "symbol",
+            "search",
+            "helper",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_json: Value = serde_json::from_slice(&default_output).unwrap();
+    assert!(
+        default_json.is_array(),
+        "non-clustered search must remain a top-level array: {default_json:#?}"
+    );
+
+    let clustered_output = grapha()
+        .args([
+            "symbol",
+            "search",
+            "helper",
+            "--cluster",
+            "--cluster-per-page",
+            "1",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let clustered: Value = serde_json::from_slice(&clustered_output).unwrap();
+    assert_eq!(clustered["result"]["query"], "helper");
+    assert!(!clustered["clusters"].as_array().unwrap().is_empty());
+    assert_eq!(clustered["page"]["items"][0]["section"], "results");
+    assert_eq!(clustered["page"]["items"][0]["item"]["name"], "helper");
+}
+
+#[test]
+fn concept_search_cluster_outputs_scored_scope_page_without_changing_default_shape() {
+    let dir = index_temp_rust_project(
+        "/// Coordinates the gift flow handoff.\npub struct CheckoutCoordinator;\n",
+    );
+
+    let default_output = grapha()
+        .args([
+            "concept",
+            "search",
+            "gift flow",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_json: Value = serde_json::from_slice(&default_output).unwrap();
+    assert!(
+        default_json["scopes"].is_array(),
+        "non-clustered concept search must keep scopes in the default result: {default_json:#?}"
+    );
+
+    let clustered_output = grapha()
+        .args([
+            "concept",
+            "search",
+            "gift flow",
+            "--cluster",
+            "--cluster-id",
+            "possible",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let clustered: Value = serde_json::from_slice(&clustered_output).unwrap();
+    assert_eq!(clustered["result"]["query"], "gift flow");
+    assert_eq!(clustered["page"]["items"][0]["section"], "scopes");
+    assert_eq!(
+        clustered["page"]["items"][0]["score"]["source"],
+        "concept_score"
+    );
+    assert_eq!(
+        clustered["page"]["items"][0]["item"]["symbol"]["name"],
+        "CheckoutCoordinator"
+    );
+}
+
+#[test]
+fn context_and_impact_cluster_list_sections() {
+    let dir = index_temp_rust_project("fn helper() {}\nfn main() { helper(); }\n");
+
+    let context_output = grapha()
+        .args([
+            "symbol",
+            "context",
+            "helper",
+            "--cluster",
+            "--cluster-id",
+            "strong",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    assert_eq!(context["result"]["symbol"]["name"], "helper");
+    assert!(
+        context["page"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["section"] == "callers"),
+        "context clusters should include caller list items: {context:#?}"
+    );
+
+    let impact_output = grapha()
+        .args([
+            "symbol",
+            "impact",
+            "helper",
+            "--cluster",
+            "--cluster-id",
+            "excellent",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let impact: Value = serde_json::from_slice(&impact_output).unwrap();
+    assert_eq!(impact["result"]["source"], "main.rs::helper");
+    assert_eq!(impact["page"]["cluster_id"], "excellent");
+    assert_eq!(impact["page"]["items"][0]["section"], "depth_1");
+}
+
+#[test]
+fn trace_cluster_outputs_flow_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "pub fn handler() { persist(); }\nfn persist() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("grapha.toml"),
+        r#"
+[[classifiers]]
+pattern = "persist"
+terminal = "persistence"
+direction = "read_write"
+operation = "UPSERT"
+"#,
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = grapha()
+        .args([
+            "flow",
+            "trace",
+            "handler",
+            "--cluster",
+            "--cluster-id",
+            "excellent",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["result"]["entry"], "main.rs::handler");
+    assert_eq!(parsed["page"]["items"][0]["section"], "flows");
+    assert_eq!(
+        parsed["page"]["items"][0]["item"]["terminal"]["kind"],
+        "persistence"
+    );
+}
+
+#[test]
+fn flow_origin_cluster_outputs_confidence_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "pub fn view() { display_name(); }\nfn display_name() { fetch_profile(); }\nfn fetch_profile() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("grapha.toml"),
+        r#"
+[[classifiers]]
+pattern = "fetch_profile"
+terminal = "network"
+direction = "read"
+operation = "GET"
+"#,
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = grapha()
+        .args([
+            "flow",
+            "origin",
+            "view",
+            "--cluster",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["result"]["symbol"], "main.rs::view");
+    assert_eq!(parsed["page"]["items"][0]["section"], "origins");
+    assert_eq!(
+        parsed["page"]["items"][0]["score"]["source"],
+        "origin_confidence"
+    );
+    assert_eq!(
+        parsed["page"]["items"][0]["item"]["api"]["name"],
+        "fetch_profile"
+    );
+}
+
+#[test]
+fn repo_changes_cluster_outputs_affected_symbols_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "fn helper() {}\nfn main() { helper(); }\n",
+    )
+    .unwrap();
+    run_git(dir.path(), &["init"]);
+    run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+    run_git(dir.path(), &["config", "user.name", "Test"]);
+    run_git(dir.path(), &["add", "."]);
+    run_git(dir.path(), &["commit", "-m", "initial"]);
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "fn helper() { let _x = 1; }\nfn main() { helper(); }\n",
+    )
+    .unwrap();
+
+    let output = grapha()
+        .args([
+            "repo",
+            "changes",
+            "unstaged",
+            "--cluster",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    assert!(
+        parsed["result"]["risk_summary"]["changed_count"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "repo changes should report at least one changed symbol: {parsed:#?}"
+    );
+    assert_eq!(parsed["page"]["items"][0]["section"], "affected_symbols");
+    assert!(
+        parsed["page"]["items"][0]["item"]["source"]
+            .as_str()
+            .is_some_and(|source| !source.is_empty()),
+        "clustered repo changes should carry the affected source symbol: {parsed:#?}"
     );
 }
 

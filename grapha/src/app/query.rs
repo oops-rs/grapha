@@ -9,8 +9,8 @@ use crate::{
     AssetCommands, BriefOutputFormat, ColorMode, ConceptCommands, ContextOutputFormat,
     FlowCommands, L10nCommands, OriginTerminalFilter, QueryOutputFormat, RepoArchOutputFormat,
     RepoDoctorOutputFormat, RepoInferenceOutputFormat, RepoSmellsOutputFormat, SymbolCommands,
-    annotations, assets, cache, changes, concepts, config, fields, history, inferred, localization,
-    maintenance, query, render, search,
+    annotations, assets, cache, changes, cluster, concepts, config, fields, history, inferred,
+    localization, maintenance, query, render, search,
 };
 
 use super::index::{
@@ -137,6 +137,37 @@ fn print_json<T: Serialize>(value: &T) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn cluster_options(args: &crate::ClusterArgs) -> Option<cluster::ClusterOptions> {
+    args.cluster.then(|| {
+        cluster::ClusterOptions::new(
+            args.cluster_id.clone(),
+            args.cluster_page,
+            args.cluster_per_page,
+            args.cluster_candidate_limit.max(1),
+        )
+    })
+}
+
+fn ensure_cluster_json(enabled: bool, is_json: bool) -> anyhow::Result<()> {
+    if enabled && !is_json {
+        bail!("--cluster is only available with JSON output");
+    }
+    Ok(())
+}
+
+fn cluster_cache_suffix(options: Option<&cluster::ClusterOptions>) -> String {
+    match options {
+        Some(options) => format!(
+            "cluster:{}:{}:{}:{}",
+            options.cluster_id.as_deref().unwrap_or(""),
+            options.page,
+            options.per_page,
+            options.candidate_limit
+        ),
+        None => "plain".to_string(),
+    }
+}
+
 fn repo_smells_cache_key(
     module: Option<&str>,
     file: Option<&str>,
@@ -230,7 +261,12 @@ pub(crate) fn handle_symbol_command(
             public_only,
             context,
             fields,
+            cluster: cluster_args,
         } => {
+            let mut cluster_options = cluster_options(&cluster_args);
+            if let Some(options) = cluster_options.as_mut() {
+                options.candidate_limit = options.candidate_limit.max(limit);
+            }
             let field_set = resolve_search_field_set(&fields, &path);
             let index = open_search_index(&path)?;
             let options = search::SearchOptions {
@@ -245,7 +281,11 @@ pub(crate) fn handle_symbol_command(
                 public_only,
             };
             let t = Instant::now();
-            let results = search::search_filtered(&index, &query, limit, &options)?;
+            let candidate_limit = cluster_options
+                .as_ref()
+                .map(|options| options.candidate_limit)
+                .unwrap_or(limit);
+            let results = search::search_filtered(&index, &query, candidate_limit, &options)?;
             let elapsed = t.elapsed();
             let graph = if search::needs_graph_for_projection(field_set, context) {
                 Some(load_graph(&path)?)
@@ -264,7 +304,27 @@ pub(crate) fn handle_symbol_command(
                 context,
                 annotations.as_ref(),
             );
-            print_json(&projected)?;
+            if let Some(cluster_options) = cluster_options.as_ref() {
+                let raw_scores = results
+                    .iter()
+                    .map(|result| result.score)
+                    .collect::<Vec<_>>();
+                let clustered = cluster::search_items(
+                    serde_json::json!({
+                        "query": query,
+                        "total": results.len(),
+                    }),
+                    &projected,
+                    &raw_scores,
+                    cluster_options,
+                );
+                print_json(&clustered)?;
+            } else {
+                print_json(&projected)?;
+                if results.len() == limit && limit > 0 {
+                    eprintln!("  hint: more score bands may be available with --cluster");
+                }
+            }
             if let Ok(status) = crate::index_status::load_index_status(&path, &path.join(".grapha"))
                 && (status.freshness_tracking_available || status.temporary)
                 && status.may_be_stale
@@ -291,11 +351,22 @@ pub(crate) fn handle_symbol_command(
             format,
             fields,
             limit,
+            cluster: cluster_args,
         } => {
+            ensure_cluster_json(
+                cluster_args.cluster,
+                matches!(format, ContextOutputFormat::Json),
+            )?;
+            let cluster_options = cluster_options(&cluster_args);
             let field_set = resolve_field_set(&fields, &path);
             let render_options = render_options.with_fields(field_set);
             let graph = load_graph(&path)?;
-            let context_options = query::context::ContextQueryOptions { limit };
+            let context_options = query::context::ContextQueryOptions {
+                limit: cluster_options
+                    .as_ref()
+                    .map(|options| options.candidate_limit)
+                    .unwrap_or(limit),
+            };
             let mut result = resolve_query_result(
                 query::context::query_context_with_options(&graph, &symbol, &context_options),
                 "symbol",
@@ -307,7 +378,13 @@ pub(crate) fn handle_symbol_command(
             }
 
             match format {
-                ContextOutputFormat::Json => print_json(&result),
+                ContextOutputFormat::Json => {
+                    if let Some(cluster_options) = cluster_options.as_ref() {
+                        print_json(&cluster::context_result(&result, &graph, cluster_options))
+                    } else {
+                        print_json(&result)
+                    }
+                }
                 ContextOutputFormat::Tree => {
                     println!(
                         "{}",
@@ -331,17 +408,34 @@ pub(crate) fn handle_symbol_command(
             format,
             fields,
             limit,
+            cluster: cluster_args,
         } => {
+            ensure_cluster_json(
+                cluster_args.cluster,
+                matches!(format, BriefOutputFormat::Json),
+            )?;
+            let cluster_options = cluster_options(&cluster_args);
             let field_set = resolve_field_set(&fields, &path);
             let render_options = render_options.with_fields(field_set);
             let graph = load_graph(&path)?;
-            let impact_options = query::impact::ImpactQueryOptions { limit };
+            let impact_options = query::impact::ImpactQueryOptions {
+                limit: cluster_options
+                    .as_ref()
+                    .map(|options| options.candidate_limit)
+                    .unwrap_or(limit),
+            };
             let result = resolve_query_result(
                 query::impact::query_impact_with_options(&graph, &symbol, depth, &impact_options),
                 "symbol",
             )?;
             match format {
-                BriefOutputFormat::Json => print_json(&result),
+                BriefOutputFormat::Json => {
+                    if let Some(cluster_options) = cluster_options.as_ref() {
+                        print_json(&cluster::impact_result(&result, cluster_options))
+                    } else {
+                        print_json(&result)
+                    }
+                }
                 BriefOutputFormat::Tree => {
                     println!(
                         "{}",
@@ -364,13 +458,22 @@ pub(crate) fn handle_symbol_command(
                 query::complexity::query_complexity(&graph, &symbol).map_err(|e| anyhow!("{e}"))?;
             print_json(&result)
         }
-        SymbolCommands::File { file, path } => {
+        SymbolCommands::File {
+            file,
+            path,
+            cluster: cluster_args,
+        } => {
+            let cluster_options = cluster_options(&cluster_args);
             let graph = load_graph(&path)?;
             let result = query::file_symbols::query_file_symbols(&graph, &file);
             if result.total == 0 {
                 anyhow::bail!("no symbols found in file matching: {file}");
             }
-            print_json(&result)
+            if let Some(cluster_options) = cluster_options.as_ref() {
+                print_json(&cluster::file_symbols_result(&result, cluster_options))
+            } else {
+                print_json(&result)
+            }
         }
         SymbolCommands::Annotate {
             symbol,
@@ -414,11 +517,22 @@ pub(crate) fn handle_flow_command(
             format,
             fields,
             limit,
+            cluster: cluster_args,
         } => match direction {
             crate::TraceDirection::Forward => {
+                ensure_cluster_json(
+                    cluster_args.cluster,
+                    matches!(format, BriefOutputFormat::Json),
+                )?;
+                let cluster_options = cluster_options(&cluster_args);
                 let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
                 let graph = load_graph(&path)?;
-                let trace_options = query::trace::TraceQueryOptions { limit };
+                let trace_options = query::trace::TraceQueryOptions {
+                    limit: cluster_options
+                        .as_ref()
+                        .map(|options| options.candidate_limit)
+                        .unwrap_or(limit),
+                };
                 let result = resolve_query_result(
                     query::trace::query_trace_with_options(
                         &graph,
@@ -429,7 +543,13 @@ pub(crate) fn handle_flow_command(
                     "symbol",
                 )?;
                 match format {
-                    BriefOutputFormat::Json => print_json(&result),
+                    BriefOutputFormat::Json => {
+                        if let Some(cluster_options) = cluster_options.as_ref() {
+                            print_json(&cluster::trace_result(&result, cluster_options))
+                        } else {
+                            print_json(&result)
+                        }
+                    }
                     BriefOutputFormat::Tree => {
                         println!(
                             "{}",
@@ -447,9 +567,19 @@ pub(crate) fn handle_flow_command(
                 }
             }
             crate::TraceDirection::Reverse => {
+                ensure_cluster_json(
+                    cluster_args.cluster,
+                    matches!(format, BriefOutputFormat::Json),
+                )?;
+                let cluster_options = cluster_options(&cluster_args);
                 let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
                 let graph = load_graph(&path)?;
-                let reverse_options = query::reverse::ReverseQueryOptions { limit };
+                let reverse_options = query::reverse::ReverseQueryOptions {
+                    limit: cluster_options
+                        .as_ref()
+                        .map(|options| options.candidate_limit)
+                        .unwrap_or(limit),
+                };
                 let result = resolve_query_result(
                     query::reverse::query_reverse_with_options(
                         &graph,
@@ -460,7 +590,13 @@ pub(crate) fn handle_flow_command(
                     "symbol",
                 )?;
                 match format {
-                    BriefOutputFormat::Json => print_json(&result),
+                    BriefOutputFormat::Json => {
+                        if let Some(cluster_options) = cluster_options.as_ref() {
+                            print_json(&cluster::reverse_result(&result, cluster_options))
+                        } else {
+                            print_json(&result)
+                        }
+                    }
                     BriefOutputFormat::Tree => {
                         println!(
                             "{}",
@@ -512,24 +648,32 @@ pub(crate) fn handle_flow_command(
             format,
             fields,
             limit,
+            cluster: cluster_args,
         } => {
+            ensure_cluster_json(
+                cluster_args.cluster,
+                matches!(format, QueryOutputFormat::Json),
+            )?;
+            let cluster_options = cluster_options(&cluster_args);
             let field_set = resolve_field_set(&fields, &path);
             let render_options = render_options.with_fields(field_set);
-            let origin_options = query::origin::OriginQueryOptions { limit };
-            handle_resolved_graph_query(
-                &path,
-                format,
-                render_options,
-                "symbol",
-                |graph| {
-                    let result = query::origin::query_origin_with_path_and_options(
-                        graph,
-                        &symbol,
-                        depth,
-                        Some(&path),
-                        &origin_options,
-                    )?;
-                    // Order matters: filter first so `--limit` operates on the
+            let origin_options = query::origin::OriginQueryOptions {
+                limit: cluster_options
+                    .as_ref()
+                    .map(|options| options.candidate_limit)
+                    .unwrap_or(limit),
+            };
+            let graph = load_graph(&path)?;
+            let result = resolve_query_result(
+                query::origin::query_origin_with_path_and_options(
+                    &graph,
+                    &symbol,
+                    depth,
+                    Some(&path),
+                    &origin_options,
+                )
+                .map(|result| {
+                    // Order matters: filter first so the limit operates on the
                     // user-visible, post-filter origin set; otherwise
                     // `--terminal-kind=network --limit=20` could return < 20
                     // network origins because non-network origins were
@@ -539,10 +683,26 @@ pub(crate) fn handle_flow_command(
                         terminal_kind.map(OriginTerminalFilter::as_str),
                     );
                     let result = query::origin::apply_origin_limit(result, &origin_options);
-                    Ok(query::origin::project_origin_result(result, field_set))
-                },
-                render::render_origin_with_options,
-            )
+                    query::origin::project_origin_result(result, field_set)
+                }),
+                "symbol",
+            )?;
+            match format {
+                QueryOutputFormat::Json => {
+                    if let Some(cluster_options) = cluster_options.as_ref() {
+                        print_json(&cluster::origin_result(&result, cluster_options))
+                    } else {
+                        print_json(&result)
+                    }
+                }
+                QueryOutputFormat::Tree => {
+                    println!(
+                        "{}",
+                        render::render_origin_with_options(&result, render_options)
+                    );
+                    Ok(())
+                }
+            }
         }
         FlowCommands::Entries {
             path,
@@ -551,24 +711,43 @@ pub(crate) fn handle_flow_command(
             limit,
             format,
             fields,
+            cluster: cluster_args,
         } => {
+            ensure_cluster_json(
+                cluster_args.cluster,
+                matches!(format, QueryOutputFormat::Json),
+            )?;
+            let cluster_options = cluster_options(&cluster_args);
             let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
-            handle_graph_query(
-                &path,
-                format,
-                render_options,
-                move |graph| {
-                    query::entries::query_entries_with_options(
-                        graph,
-                        &query::entries::EntriesQueryOptions {
-                            module,
-                            file,
-                            limit: Some(limit),
-                        },
-                    )
-                },
-                render::render_entries_with_options,
-            )
+            if let Some(cluster_options) = cluster_options.as_ref() {
+                let graph = load_graph(&path)?;
+                let result = query::entries::query_entries_with_options(
+                    &graph,
+                    &query::entries::EntriesQueryOptions {
+                        module,
+                        file,
+                        limit: Some(cluster_options.candidate_limit),
+                    },
+                );
+                print_json(&cluster::entries_result(&result, cluster_options))
+            } else {
+                handle_graph_query(
+                    &path,
+                    format,
+                    render_options,
+                    move |graph| {
+                        query::entries::query_entries_with_options(
+                            graph,
+                            &query::entries::EntriesQueryOptions {
+                                module,
+                                file,
+                                limit: Some(limit),
+                            },
+                        )
+                    },
+                    render::render_entries_with_options,
+                )
+            }
         }
     }
 }
@@ -625,15 +804,29 @@ pub(crate) fn handle_l10n_command(
             path,
             format,
             fields,
+            cluster: cluster_args,
         } => {
+            ensure_cluster_json(
+                cluster_args.cluster,
+                matches!(format, QueryOutputFormat::Json),
+            )?;
+            let cluster_options = cluster_options(&cluster_args);
             let store_dir = path.join(".grapha");
             let db_path = store_dir.join("grapha.db");
             let query_cache = cache::QueryCache::new(&store_dir);
             let format_key = format!("{format:?}");
             let table_key = table.as_deref().unwrap_or("");
             let fields_key = fields.as_deref().unwrap_or("");
-            let cache_key =
-                query_cache_key(&["l10n", "usages", &key, table_key, &format_key, fields_key]);
+            let cluster_key = cluster_cache_suffix(cluster_options.as_ref());
+            let cache_key = query_cache_key(&[
+                "l10n",
+                "usages",
+                &key,
+                table_key,
+                &format_key,
+                fields_key,
+                &cluster_key,
+            ]);
 
             if let Some(cached) = query_cache.get(&cache_key, &db_path) {
                 print!("{cached}");
@@ -647,7 +840,12 @@ pub(crate) fn handle_l10n_command(
 
             let output = match format {
                 QueryOutputFormat::Json => {
-                    let s = serde_json::to_string_pretty(&result)?;
+                    let value = if let Some(cluster_options) = cluster_options.as_ref() {
+                        cluster::usages_result(&result, cluster_options)
+                    } else {
+                        serde_json::to_value(&result)?
+                    };
+                    let s = serde_json::to_string_pretty(&value)?;
                     println!("{s}");
                     format!("{s}\n")
                 }
@@ -722,7 +920,13 @@ pub(crate) fn handle_concept_command(
             path,
             format,
             fields,
+            cluster: cluster_args,
         } => {
+            ensure_cluster_json(
+                cluster_args.cluster,
+                matches!(format, QueryOutputFormat::Json),
+            )?;
+            let cluster_options = cluster_options(&cluster_args);
             let field_set = resolve_concept_search_field_set(&fields, &path);
             let render_options = render_options.with_fields(field_set);
             let graph = load_graph(&path)?;
@@ -740,12 +944,20 @@ pub(crate) fn handle_concept_command(
                 &catalogs,
                 &assets_index,
                 &term,
-                limit,
+                cluster_options
+                    .as_ref()
+                    .map(|options| options.candidate_limit)
+                    .unwrap_or(limit),
                 annotations.as_ref(),
             )?;
             match format {
                 QueryOutputFormat::Json => {
-                    print_json(&concepts::project_concept_search_result(&result, field_set))
+                    let projected = concepts::project_concept_search_result(&result, field_set);
+                    if let Some(cluster_options) = cluster_options.as_ref() {
+                        print_json(&cluster::concept_search_result(&projected, cluster_options))
+                    } else {
+                        print_json(&projected)
+                    }
                 }
                 QueryOutputFormat::Tree => {
                     println!(
@@ -838,24 +1050,54 @@ pub(crate) fn handle_repo_command(command: crate::RepoCommands) -> anyhow::Resul
             let status = crate::index_status::load_index_status(&path, &path.join(".grapha"))?;
             print_json(&status)
         }
-        crate::RepoCommands::Changes { scope, path, limit } => {
+        crate::RepoCommands::Changes {
+            scope,
+            path,
+            limit,
+            cluster: cluster_args,
+        } => {
+            let cluster_options = cluster_options(&cluster_args);
             let graph = load_graph(&path)?;
-            let change_options = changes::ChangeQueryOptions { limit };
+            let change_options = changes::ChangeQueryOptions {
+                limit: cluster_options
+                    .as_ref()
+                    .map(|options| options.candidate_limit)
+                    .unwrap_or(limit),
+            };
             let report =
                 changes::detect_changes_with_options(&path, &graph, &scope, &change_options)?;
-            print_json(&report)
+            if let Some(cluster_options) = cluster_options.as_ref() {
+                print_json(&cluster::changes_result(&report, cluster_options))
+            } else {
+                print_json(&report)
+            }
         }
         crate::RepoCommands::Map { module, path } => {
             let graph = load_graph(&path)?;
             let map = query::map::file_map(&graph, module.as_deref());
             print_json(&map)
         }
-        crate::RepoCommands::Arch { path, format } => {
+        crate::RepoCommands::Arch {
+            path,
+            format,
+            cluster: cluster_args,
+        } => {
+            ensure_cluster_json(
+                cluster_args.cluster,
+                matches!(format, RepoArchOutputFormat::Json),
+            )?;
+            let cluster_options = cluster_options(&cluster_args);
             let graph = load_graph(&path)?;
             let cfg = config::load_config(&path);
             let result = query::arch::check_architecture(&graph, &cfg.architecture);
             match format {
-                RepoArchOutputFormat::Json => print_json(&result),
+                RepoArchOutputFormat::Json => {
+                    if let Some(cluster_options) = cluster_options.as_ref() {
+                        print_json(&cluster::architecture_result(&result, cluster_options))
+                    } else {
+                        print_json(&result)
+                    }
+                }
                 RepoArchOutputFormat::Brief => {
                     println!(
                         "{}",
@@ -872,7 +1114,13 @@ pub(crate) fn handle_repo_command(command: crate::RepoCommands) -> anyhow::Resul
             no_cache,
             format,
             path,
+            cluster: cluster_args,
         } => {
+            ensure_cluster_json(
+                cluster_args.cluster,
+                matches!(format, RepoSmellsOutputFormat::Json),
+            )?;
+            let cluster_options = cluster_options(&cluster_args);
             let selected_scope_count = usize::from(module.is_some())
                 + usize::from(file.is_some())
                 + usize::from(symbol.is_some());
@@ -889,6 +1137,12 @@ pub(crate) fn handle_repo_command(command: crate::RepoCommands) -> anyhow::Resul
                 symbol.as_deref(),
                 format,
             );
+            let cache_key = if cluster_options.is_some() {
+                let suffix = cluster_cache_suffix(cluster_options.as_ref());
+                query_cache_key(&[cache_key.as_str(), suffix.as_str()])
+            } else {
+                cache_key
+            };
 
             if !no_cache && let Some(cached) = query_cache.get(&cache_key, &db_path) {
                 print!("{cached}");
@@ -914,7 +1168,12 @@ pub(crate) fn handle_repo_command(command: crate::RepoCommands) -> anyhow::Resul
 
             let output = match format {
                 RepoSmellsOutputFormat::Json => {
-                    format!("{}\n", serde_json::to_string_pretty(&result)?)
+                    let value = if let Some(cluster_options) = cluster_options.as_ref() {
+                        cluster::smells_result(&result, cluster_options)
+                    } else {
+                        serde_json::to_value(&result)?
+                    };
+                    format!("{}\n", serde_json::to_string_pretty(&value)?)
                 }
                 RepoSmellsOutputFormat::Brief => {
                     format!("{}\n", render::render_smells_brief_with_options(&result))
@@ -935,7 +1194,16 @@ pub(crate) fn handle_repo_command(command: crate::RepoCommands) -> anyhow::Resul
             let result = query::module_summary::query_module_summary(&graph);
             print_json(&result)
         }
-        crate::RepoCommands::Infer { format, path } => {
+        crate::RepoCommands::Infer {
+            format,
+            path,
+            cluster: cluster_args,
+        } => {
+            ensure_cluster_json(
+                cluster_args.cluster,
+                matches!(format, RepoInferenceOutputFormat::Json),
+            )?;
+            let cluster_options = cluster_options(&cluster_args);
             let cfg = config::load_config(&path);
             let store_path = inferred::inferred_store_path(&path);
             let (index, saved) = if cfg.inferred.enabled {
@@ -948,7 +1216,13 @@ pub(crate) fn handle_repo_command(command: crate::RepoCommands) -> anyhow::Resul
             };
             let result = inferred::build_result(cfg.inferred.enabled, saved, &store_path, &index);
             match format {
-                RepoInferenceOutputFormat::Json => print_json(&result),
+                RepoInferenceOutputFormat::Json => {
+                    if let Some(cluster_options) = cluster_options.as_ref() {
+                        print_json(&cluster::inferred_result(&result, cluster_options))
+                    } else {
+                        print_json(&result)
+                    }
+                }
                 RepoInferenceOutputFormat::Brief => {
                     println!("{}", render::render_inferred_brief_with_options(&result));
                     Ok(())
