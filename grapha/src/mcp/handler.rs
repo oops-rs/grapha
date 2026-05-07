@@ -79,7 +79,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "fields": {
                         "type": "string",
-                        "description": "Optional comma-separated projected fields to include (for example: id,locator,doc_comment,annotation,signature; or full/all/none)"
+                        "description": "Optional comma-separated projected fields to include (for example: score,id,locator,doc_comment,annotation,signature; or full/all/none)"
                     }
                 },
                 "required": ["query"]

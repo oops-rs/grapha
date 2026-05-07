@@ -360,7 +360,7 @@ enum SymbolCommands {
         /// Include source snippet and relationships in results
         #[arg(long)]
         context: bool,
-        /// Fields to display (comma-separated: file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or "full"/"all"/"none")
+        /// Fields to display (comma-separated: score,file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or "full"/"all"/"none")
         #[arg(long)]
         fields: Option<String>,
     },

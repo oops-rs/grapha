@@ -82,7 +82,8 @@ fn resolve_search_field_set(fields_flag: &Option<String>, path: &Path) -> fields
         Some(_) => resolve_field_set(fields_flag, path),
         None => resolve_field_set(fields_flag, path)
             .with_id()
-            .with_locator(),
+            .with_locator()
+            .with_annotation(),
     }
 }
 

@@ -260,6 +260,65 @@ fn symbol_annotations_round_trip_through_cli_context_and_concept_search() {
         .stdout(predicate::str::contains(annotation_text))
         .stdout(predicate::str::contains("\"stale\": false"));
 
+    let search_output = grapha()
+        .env("GRAPHA_HOME", grapha_home.path())
+        .args([
+            "symbol",
+            "search",
+            "CheckoutCoordinator",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&search_output).unwrap();
+    let search_result = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["name"] == "CheckoutCoordinator")
+        .expect("search should return CheckoutCoordinator");
+    assert_eq!(search_result["annotation"]["text"], annotation_text);
+    assert!(
+        search_result.get("score").is_none(),
+        "symbol search should not serialize ranking scores by default: {parsed:#?}"
+    );
+
+    let scored_search_output = grapha()
+        .env("GRAPHA_HOME", grapha_home.path())
+        .args([
+            "symbol",
+            "search",
+            "CheckoutCoordinator",
+            "-p",
+            dir.path().to_str().unwrap(),
+            "--fields",
+            "score,annotation",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&scored_search_output).unwrap();
+    let scored_search_result = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["name"] == "CheckoutCoordinator")
+        .expect("scored search should return CheckoutCoordinator");
+    assert!(
+        scored_search_result["score"].is_number(),
+        "symbol search should serialize scores when the score field is requested: {parsed:#?}"
+    );
+    assert_eq!(
+        scored_search_result["annotation"]["text"], annotation_text,
+        "explicit fields still allow annotations when requested"
+    );
+
     let context_output = grapha()
         .env("GRAPHA_HOME", grapha_home.path())
         .args([

@@ -29,6 +29,7 @@ impl RenderOptions {
         Self {
             color_enabled: false,
             fields: FieldSet {
+                score: false,
                 file: true,
                 id: false,
                 locator: false,
@@ -49,6 +50,7 @@ impl RenderOptions {
         Self {
             color_enabled: true,
             fields: FieldSet {
+                score: false,
                 file: true,
                 id: false,
                 locator: false,

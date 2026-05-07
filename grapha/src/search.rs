@@ -731,7 +731,8 @@ fn locator_rank(locator: &str, query_lower: &str) -> usize {
 pub struct SearchOutputResult {
     pub name: String,
     pub kind: String,
-    pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -867,7 +868,7 @@ pub fn project_results(
             SearchOutputResult {
                 name: result.name.clone(),
                 kind: result.kind.clone(),
-                score: result.score,
+                score: fields.score.then_some(result.score),
                 file: fields.file.then(|| result.file.clone()),
                 id: fields.id.then(|| result.id.clone()),
                 locator: fields.locator.then(|| result.locator.clone()),

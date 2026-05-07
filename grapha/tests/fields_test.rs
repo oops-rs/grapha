@@ -3,6 +3,7 @@ use grapha::fields::FieldSet;
 #[test]
 fn default_has_file_true_rest_false() {
     let fs = FieldSet::default();
+    assert!(!fs.score);
     assert!(fs.file);
     assert!(!fs.id);
     assert!(!fs.module);
@@ -18,6 +19,7 @@ fn default_has_file_true_rest_false() {
 #[test]
 fn parse_all_enables_every_field() {
     let fs = FieldSet::parse("all");
+    assert!(fs.score);
     assert!(fs.file);
     assert!(fs.id);
     assert!(fs.module);
@@ -33,6 +35,7 @@ fn parse_all_enables_every_field() {
 #[test]
 fn parse_full_alias_enables_every_field() {
     let fs = FieldSet::parse("full");
+    assert!(fs.score);
     assert!(fs.file);
     assert!(fs.id);
     assert!(fs.module);
@@ -48,6 +51,7 @@ fn parse_full_alias_enables_every_field() {
 #[test]
 fn parse_none_disables_every_field() {
     let fs = FieldSet::parse("none");
+    assert!(!fs.score);
     assert!(!fs.file);
     assert!(!fs.id);
     assert!(!fs.module);
@@ -110,8 +114,17 @@ fn parse_doc_comment_field() {
 fn parse_annotation_field() {
     let fs = FieldSet::parse("annotation");
     assert!(fs.annotation);
+    assert!(!fs.score);
     assert!(!fs.file);
     assert!(!fs.doc_comment);
+}
+
+#[test]
+fn parse_score_field() {
+    let fs = FieldSet::parse("score");
+    assert!(fs.score);
+    assert!(!fs.file);
+    assert!(!fs.annotation);
 }
 
 #[test]

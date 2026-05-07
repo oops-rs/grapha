@@ -4,6 +4,7 @@
 /// in `grapha.toml` under `[output] default_fields`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FieldSet {
+    pub score: bool,
     pub file: bool,
     pub id: bool,
     pub locator: bool,
@@ -21,6 +22,7 @@ pub struct FieldSet {
 impl Default for FieldSet {
     fn default() -> Self {
         Self {
+            score: false,
             file: true,
             id: false,
             locator: false,
@@ -48,8 +50,14 @@ impl FieldSet {
         self
     }
 
+    pub fn with_annotation(mut self) -> Self {
+        self.annotation = true;
+        self
+    }
+
     pub fn all() -> Self {
         Self {
+            score: true,
             file: true,
             id: true,
             locator: true,
@@ -67,6 +75,7 @@ impl FieldSet {
 
     pub fn none() -> Self {
         Self {
+            score: false,
             file: false,
             id: false,
             locator: false,
@@ -90,6 +99,7 @@ impl FieldSet {
                 let mut fs = Self::none();
                 for field in s.split(',') {
                     match field.trim() {
+                        "score" => fs.score = true,
                         "file" => fs.file = true,
                         "id" => fs.id = true,
                         "locator" => fs.locator = true,
