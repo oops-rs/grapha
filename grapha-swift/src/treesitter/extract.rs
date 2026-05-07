@@ -802,7 +802,7 @@ fn extract_enum_entries(
                 metadata: HashMap::new(),
                 role: None,
                 signature: None,
-                doc_comment: None,
+                doc_comment: extract_swift_doc_comment(child, source),
                 module: None,
                 snippet: None,
                 repo: None,
@@ -1322,7 +1322,10 @@ fn collect_doc_comments(
     out: &mut HashMap<(String, usize), String>,
 ) {
     match node.kind() {
-        "class_declaration" | "protocol_declaration" => {
+        "class_declaration"
+        | "struct_declaration"
+        | "enum_declaration"
+        | "protocol_declaration" => {
             if let Some(name) = type_identifier_text(node, source)
                 && let Some(doc) = extract_swift_doc_comment(node, source)
             {
@@ -1355,6 +1358,13 @@ fn collect_doc_comments(
         }
         "typealias_declaration" => {
             if let Some(name) = type_identifier_text(node, source)
+                && let Some(doc) = extract_swift_doc_comment(node, source)
+            {
+                out.insert((name, node.start_position().row + 1), doc);
+            }
+        }
+        "enum_entry" => {
+            if let Some(name) = simple_identifier_text(node, source)
                 && let Some(doc) = extract_swift_doc_comment(node, source)
             {
                 out.insert((name, node.start_position().row + 1), doc);

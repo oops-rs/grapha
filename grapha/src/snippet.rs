@@ -9,10 +9,7 @@ thread_local! {
 }
 
 pub fn should_extract_snippet(kind: NodeKind) -> bool {
-    !matches!(
-        kind,
-        NodeKind::Field | NodeKind::Variant | NodeKind::View | NodeKind::Branch
-    )
+    !matches!(kind, NodeKind::Field | NodeKind::View | NodeKind::Branch)
 }
 
 pub fn trim_snippet_indentation(snippet: &str) -> String {
@@ -462,7 +459,7 @@ fn declaration_matches_symbol(line: &str, symbol: &str, kind: NodeKind) -> bool 
 
 #[cfg(test)]
 mod tests {
-    use super::{LineIndex, trim_snippet_indentation};
+    use super::{LineIndex, should_extract_snippet, trim_snippet_indentation};
     use grapha_core::graph::{NodeKind, Span};
 
     #[test]
@@ -546,6 +543,22 @@ mod tests {
         assert_eq!(
             index.extract_symbol_snippet(&span, "remarkName", NodeKind::Property),
             Some("@Published private(set) var remarkName: String = \"\"".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_symbol_snippet_handles_enum_variants() {
+        let source = "public enum ActivityTaskCode: Int {\n    case newUserRoomTask = 11\n}\n";
+        let index = LineIndex::new(source);
+        let span = Span {
+            start: [2, 10],
+            end: [2, 10],
+        };
+
+        assert!(should_extract_snippet(NodeKind::Variant));
+        assert_eq!(
+            index.extract_symbol_snippet(&span, "newUserRoomTask", NodeKind::Variant),
+            Some("case newUserRoomTask = 11".to_string())
         );
     }
 

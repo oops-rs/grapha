@@ -86,6 +86,7 @@ mod tests {
         let result = extract(
             r#"
             public enum Color {
+                /// Warm stop color.
                 case red
                 case green
             }
@@ -96,6 +97,7 @@ mod tests {
 
         let red = find_node(&result, "red");
         assert_eq!(red.kind, NodeKind::Variant);
+        assert_eq!(red.doc_comment.as_deref(), Some("/// Warm stop color."));
 
         let green = find_node(&result, "green");
         assert_eq!(green.kind, NodeKind::Variant);
@@ -1570,6 +1572,48 @@ class GameManager {
                 .unwrap()
                 .contains("current score"),
             "doc should contain expected text"
+        );
+    }
+
+    #[test]
+    fn enrich_doc_comments_patches_enum_case_docs() {
+        let source = br#"public enum ActivityTaskCode: Int {
+    /// New user room owner task.
+    case newUserRoomTask = 11
+}
+"#;
+        // Simulate index-store output: correct symbol name and 1-based line,
+        // but no doc comment attached to the variant.
+        let mut result = ExtractionResult::new();
+        result.nodes.push(Node {
+            id: "s:ActivityTaskCode.newUserRoomTask".into(),
+            kind: NodeKind::Variant,
+            name: "newUserRoomTask".into(),
+            file: "ActivityAPI.swift".into(),
+            span: Span {
+                start: [3, 10],
+                end: [3, 10],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
+            snippet: None,
+            repo: None,
+        });
+
+        enrich_doc_comments(source, &mut result).unwrap();
+
+        let task = result
+            .nodes
+            .iter()
+            .find(|n| n.name == "newUserRoomTask")
+            .unwrap();
+        assert_eq!(
+            task.doc_comment.as_deref(),
+            Some("/// New user room owner task.")
         );
     }
 
