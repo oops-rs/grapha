@@ -208,7 +208,7 @@ grapha repo history list [--kind test] [--file PATH] [--module M] [--symbol QUER
 grapha index <path> [--format sqlite|json] [--store-dir DIR] [--full-rebuild] [--timing]
 grapha migrate [-p PATH] [--from OTHER_WORKTREE_OR_STORE] [--force]
 grapha analyze <path> [--compact] [--filter fn,struct]
-grapha serve [-p PATH] [--mcp] [--watch] [--port N]    # HTTP binds 0.0.0.0 for LAN access
+grapha serve [-p PATH] [--mcp] [--watch[=true|false]] [--host HOST] [--port N]
 ```
 
 ### Localization & Assets
@@ -241,6 +241,11 @@ name = "MobileApp"                         # defaults to the project directory n
 
 [annotations]
 server = "http://192.168.1.10:8080"        # default for `grapha annotation sync`
+
+[serve]
+host = "0.0.0.0"                           # default bind host for `grapha serve`
+port = 18081                               # default HTTP port for this project
+watch = true                               # auto-refresh graph while serving
 
 [swift]
 index_store = true                         # false → tree-sitter only
@@ -278,7 +283,7 @@ operation = "set"
 Global developer defaults can live in `$GRAPHA_CONFIG`,
 `$XDG_CONFIG_HOME/grapha/config.toml`, `~/.config/grapha/config.toml`, or
 `~/.grapha/config.toml`. Project `grapha.toml` overrides global config for
-repo-specific values such as `[annotations].server`.
+repo-specific values such as `[annotations].server` and `[serve].port`.
 
 ## Architecture
 

@@ -211,15 +211,18 @@ enum Commands {
         /// Project directory
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
-        /// Port to listen on
-        #[arg(long, default_value = "8080")]
-        port: u16,
+        /// Host/interface to bind. Defaults to [serve].host or 0.0.0.0.
+        #[arg(long)]
+        host: Option<String>,
+        /// Port to listen on. Defaults to [serve].port or 8080.
+        #[arg(long)]
+        port: Option<u16>,
         /// Run as MCP server over stdio (instead of HTTP)
         #[arg(long)]
         mcp: bool,
-        /// Watch for file changes and auto-update the graph
-        #[arg(long)]
-        watch: bool,
+        /// Watch for file changes and auto-update the graph. Defaults to [serve].watch or false.
+        #[arg(long, default_missing_value = "true", num_args = 0..=1, require_equals = true)]
+        watch: Option<bool>,
     },
     /// Serve and sync the local-first annotation store
     Annotation {
@@ -812,10 +815,11 @@ fn main() -> anyhow::Result<()> {
         Commands::Migrate { path, from, force } => app::migrate::handle_migrate(path, from, force)?,
         Commands::Serve {
             path,
+            host,
             port,
             mcp,
             watch,
-        } => app::serve::handle_serve(path, port, mcp, watch)?,
+        } => app::serve::handle_serve(path, host, port, mcp, watch)?,
         Commands::Annotation { command } => app::annotation::handle_annotation_command(command)?,
         Commands::Symbol { command } => app::query::handle_symbol_command(command, render_options)?,
         Commands::Flow { command } => app::query::handle_flow_command(command, render_options)?,

@@ -15,5 +15,6 @@
 - Use `grapha annotation serve`, `grapha annotation list`, and `grapha annotation sync` when sharing annotation knowledge across local machines
 - Treat `grapha annotation serve` as a standalone annotation daemon; do not require a project index before starting it
 - Configure annotation sync with `[annotations].server` in project/global Grapha config, `GRAPHA_ANNOTATION_SERVER`, or an explicit `--server` override
+- Configure project graph serving with `[serve].host`, `[serve].port`, and `[serve].watch` when a project should have stable `grapha serve` defaults
 - Use `$XDG_CONFIG_HOME/grapha/config.toml`, `~/.config/grapha/config.toml`, or `~/.grapha/config.toml` for developer-level Grapha defaults
 - Prefer setting `[repo].name` in `grapha.toml` before syncing non-Git project copies that should share the same annotation identity

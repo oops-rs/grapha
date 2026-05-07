@@ -60,3 +60,4 @@ Use grapha's code intelligence to navigate, understand, and assess codebases bef
 - After significant code changes, run `grapha index .` to keep the graph fresh and refresh stored snippets
 - After resolving a non-obvious symbol's role or invariant, consider `grapha symbol annotate <symbol> "<compact note>" --by <agent>` so future agents can spend fewer tokens reloading context
 - Before relying on shared annotation knowledge from another machine, run `grapha annotation sync` after configuring `[annotations].server` in project or global config, or `GRAPHA_ANNOTATION_SERVER`.
+- For project-bound graph serving, prefer stable `[serve].host`, `[serve].port`, and `[serve].watch` defaults in `grapha.toml` instead of repeating `grapha serve --port ... --watch`.

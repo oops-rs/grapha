@@ -73,6 +73,16 @@ pub struct AnnotationConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+pub struct ServeConfig {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub watch: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct GraphaConfig {
     #[serde(default)]
     pub repo: RepoConfig,
@@ -86,6 +96,8 @@ pub struct GraphaConfig {
     pub inferred: InferredConfig,
     #[serde(default)]
     pub annotations: AnnotationConfig,
+    #[serde(default)]
+    pub serve: ServeConfig,
     #[serde(default)]
     pub classifiers: Vec<ClassifierRule>,
     #[serde(default)]
@@ -393,6 +405,20 @@ server = "http://192.168.1.10:8080"
             config.annotations.server.as_deref(),
             Some("http://192.168.1.10:8080")
         );
+    }
+
+    #[test]
+    fn parse_serve_config() {
+        let toml_str = r#"
+[serve]
+host = "127.0.0.1"
+port = 18081
+watch = true
+"#;
+        let config: GraphaConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.serve.host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(config.serve.port, Some(18081));
+        assert_eq!(config.serve.watch, Some(true));
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub async fn run(
     project_path: PathBuf,
     graph: Graph,
     search_index: Index,
+    host: String,
     port: u16,
 ) -> anyhow::Result<()> {
     let state = Arc::new(AppState {
@@ -54,8 +55,8 @@ pub async fn run(
         .with_state(state)
         .layer(tower_http::cors::CorsLayer::permissive());
 
-    eprintln!("  \x1b[32m✓\x1b[0m serving at http://localhost:{port}");
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    eprintln!("  \x1b[32m✓\x1b[0m serving at http://{host}:{port}");
+    let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
