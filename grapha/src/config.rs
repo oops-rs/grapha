@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -135,12 +136,116 @@ impl GraphaConfig {
 
 pub fn load_config(project_root: &Path) -> GraphaConfig {
     let config_path = project_root.join("grapha.toml");
+    load_config_file(&config_path)
+}
+
+pub fn load_global_config() -> GraphaConfig {
+    load_first_existing_config(global_config_paths())
+}
+
+pub fn global_config_paths() -> Vec<PathBuf> {
+    global_config_paths_from_env(
+        |key| std::env::var_os(key),
+        home_dir_from_env,
+        current_platform,
+    )
+}
+
+fn load_first_existing_config(paths: Vec<PathBuf>) -> GraphaConfig {
+    paths
+        .into_iter()
+        .find(|path| path.exists())
+        .map(|path| load_config_file(&path))
+        .unwrap_or_default()
+}
+
+fn load_config_file(config_path: &Path) -> GraphaConfig {
     if !config_path.exists() {
         return GraphaConfig::default();
     }
-    match std::fs::read_to_string(&config_path) {
+    match std::fs::read_to_string(config_path) {
         Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
         Err(_) => GraphaConfig::default(),
+    }
+}
+
+fn global_config_paths_from_env<E, H, P>(mut env_var: E, home_dir: H, platform: P) -> Vec<PathBuf>
+where
+    E: FnMut(&str) -> Option<OsString>,
+    H: Fn() -> Option<PathBuf>,
+    P: Fn() -> Platform,
+{
+    if let Some(path) = env_var("GRAPHA_CONFIG").filter(|value| !value.is_empty()) {
+        return vec![PathBuf::from(path)];
+    }
+
+    let mut paths = Vec::new();
+    match platform() {
+        Platform::Windows => {
+            if let Some(appdata) = env_var("APPDATA").filter(|value| !value.is_empty()) {
+                paths.push(PathBuf::from(appdata).join("grapha").join("config.toml"));
+            }
+            if let Some(home) = home_dir() {
+                paths.push(home.join(".config").join("grapha").join("config.toml"));
+                paths.push(home.join(".grapha").join("config.toml"));
+            }
+        }
+        Platform::Unix | Platform::MacOs => {
+            if let Some(xdg_config_home) =
+                env_var("XDG_CONFIG_HOME").filter(|value| !value.is_empty())
+            {
+                paths.push(
+                    PathBuf::from(xdg_config_home)
+                        .join("grapha")
+                        .join("config.toml"),
+                );
+            } else if let Some(home) = home_dir() {
+                paths.push(home.join(".config").join("grapha").join("config.toml"));
+            }
+            if let Some(home) = home_dir() {
+                paths.push(home.join(".grapha").join("config.toml"));
+            }
+        }
+    }
+
+    paths.dedup();
+    paths
+}
+
+fn home_dir_from_env() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum Platform {
+    MacOs,
+    Windows,
+    Unix,
+}
+
+fn current_platform() -> Platform {
+    #[cfg(target_os = "macos")]
+    {
+        Platform::MacOs
+    }
+
+    #[cfg(windows)]
+    {
+        Platform::Windows
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
+    {
+        Platform::Unix
     }
 }
 
@@ -287,6 +392,75 @@ server = "http://192.168.1.10:8080"
         assert_eq!(
             config.annotations.server.as_deref(),
             Some("http://192.168.1.10:8080")
+        );
+    }
+
+    #[test]
+    fn global_config_paths_prefer_explicit_grapha_config() {
+        let explicit = PathBuf::from("/tmp/grapha-global.toml");
+        let paths = global_config_paths_from_env(
+            |key| (key == "GRAPHA_CONFIG").then(|| explicit.clone().into_os_string()),
+            || Some(PathBuf::from("/home/dev")),
+            || Platform::Unix,
+        );
+
+        assert_eq!(paths, vec![explicit]);
+    }
+
+    #[test]
+    fn global_config_paths_use_xdg_config_then_home_grapha_on_unix() {
+        let xdg_config_home = PathBuf::from("/tmp/xdg-config");
+        let home = PathBuf::from("/home/dev");
+        let paths = global_config_paths_from_env(
+            |key| (key == "XDG_CONFIG_HOME").then(|| xdg_config_home.clone().into_os_string()),
+            || Some(home.clone()),
+            || Platform::Unix,
+        );
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/tmp/xdg-config/grapha/config.toml"),
+                PathBuf::from("/home/dev/.grapha/config.toml")
+            ]
+        );
+    }
+
+    #[test]
+    fn global_config_paths_use_home_config_when_xdg_is_missing() {
+        let home = PathBuf::from("/home/dev");
+        let paths =
+            global_config_paths_from_env(|_| None, || Some(home.clone()), || Platform::Unix);
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/home/dev/.config/grapha/config.toml"),
+                PathBuf::from("/home/dev/.grapha/config.toml")
+            ]
+        );
+    }
+
+    #[test]
+    fn load_first_existing_global_config_reads_annotations_server() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.toml");
+        let config_path = dir.path().join("config.toml");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        writeln!(
+            f,
+            r#"
+[annotations]
+server = "http://10.0.0.2:8080"
+"#
+        )
+        .unwrap();
+
+        let config = load_first_existing_config(vec![missing, config_path]);
+
+        assert_eq!(
+            config.annotations.server.as_deref(),
+            Some("http://10.0.0.2:8080")
         );
     }
 

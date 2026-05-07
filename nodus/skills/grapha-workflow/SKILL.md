@@ -37,7 +37,8 @@ Use grapha's code intelligence to navigate, understand, and assess codebases bef
 - `grapha annotation list` — inspect local annotation records and their project/branch identity
 - `grapha annotation sync` — pull, merge, and push annotations against the configured Grapha annotation service
 - `grapha annotation sync --server http://HOST:8080` — override the configured service for one sync
-- `grapha annotation sync` resolves the service address from `--server`, then `GRAPHA_ANNOTATION_SERVER`, then `[annotations].server` in `grapha.toml`.
+- `grapha annotation sync` resolves the service address from `--server`, then `GRAPHA_ANNOTATION_SERVER`, then project `grapha.toml`, then global Grapha config.
+- Global config can live at `$GRAPHA_CONFIG`, `$XDG_CONFIG_HOME/grapha/config.toml`, `~/.config/grapha/config.toml`, or `~/.grapha/config.toml`.
 - `list` and `sync` use the current directory by default; pass `--path` only when operating on another project.
 - Annotation records are scoped by project id and branch, while retaining fallback behavior for legacy/shared records. Set `[repo].name` in `grapha.toml` when syncing non-Git copies that should share one project identity.
 
@@ -57,4 +58,4 @@ Use grapha's code intelligence to navigate, understand, and assess codebases bef
 - Use `file.swift::symbol` to disambiguate when multiple symbols share a name
 - After significant code changes, run `grapha index .` to keep the graph fresh and refresh stored snippets
 - After resolving a non-obvious symbol's role or invariant, consider `grapha symbol annotate <symbol> "<compact note>" --by <agent>` so future agents can spend fewer tokens reloading context
-- Before relying on shared annotation knowledge from another machine, run `grapha annotation sync` after configuring `[annotations].server` or `GRAPHA_ANNOTATION_SERVER`.
+- Before relying on shared annotation knowledge from another machine, run `grapha annotation sync` after configuring `[annotations].server` in project or global config, or `GRAPHA_ANNOTATION_SERVER`.

@@ -8,6 +8,7 @@ fn resolve_sync_server(
         cli_server,
         std::env::var("GRAPHA_ANNOTATION_SERVER").ok(),
         crate::config::load_config(path).annotations.server,
+        crate::config::load_global_config().annotations.server,
     )
 }
 
@@ -19,15 +20,17 @@ fn non_empty(value: String) -> Option<String> {
 fn resolve_sync_server_from(
     cli_server: Option<String>,
     env_server: Option<String>,
-    config_server: Option<String>,
+    project_server: Option<String>,
+    global_server: Option<String>,
 ) -> anyhow::Result<String> {
     cli_server
         .and_then(non_empty)
         .or_else(|| env_server.and_then(non_empty))
-        .or_else(|| config_server.and_then(non_empty))
+        .or_else(|| project_server.and_then(non_empty))
+        .or_else(|| global_server.and_then(non_empty))
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "annotation server not configured; pass --server, set GRAPHA_ANNOTATION_SERVER, or add [annotations] server = \"http://HOST:8080\" to grapha.toml"
+                "annotation server not configured; pass --server, set GRAPHA_ANNOTATION_SERVER, or add [annotations] server = \"http://HOST:8080\" to grapha.toml or the global Grapha config"
             )
         })
 }
@@ -70,6 +73,7 @@ mod tests {
             Some(" http://cli:8080 ".to_string()),
             Some("http://env:8080".to_string()),
             Some("http://config:8080".to_string()),
+            Some("http://global:8080".to_string()),
         )
         .unwrap();
 
@@ -82,6 +86,7 @@ mod tests {
             None,
             Some(" http://env:8080 ".to_string()),
             Some("http://config:8080".to_string()),
+            Some("http://global:8080".to_string()),
         )
         .unwrap();
 
@@ -94,6 +99,7 @@ mod tests {
             Some(" ".to_string()),
             Some("\t".to_string()),
             Some(" http://config:8080 ".to_string()),
+            Some("http://global:8080".to_string()),
         )
         .unwrap();
 
@@ -101,9 +107,27 @@ mod tests {
     }
 
     #[test]
+    fn sync_server_uses_global_config_when_other_sources_are_empty() {
+        let server = resolve_sync_server_from(
+            None,
+            Some(" ".to_string()),
+            Some("\t".to_string()),
+            Some(" http://global:8080 ".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(server, "http://global:8080");
+    }
+
+    #[test]
     fn sync_server_requires_at_least_one_non_empty_source() {
-        let error = resolve_sync_server_from(None, Some(" ".to_string()), Some("".to_string()))
-            .unwrap_err();
+        let error = resolve_sync_server_from(
+            None,
+            Some(" ".to_string()),
+            Some("".to_string()),
+            Some("\n".to_string()),
+        )
+        .unwrap_err();
 
         assert!(
             error

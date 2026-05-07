@@ -171,9 +171,9 @@ grapha annotation sync --server http://HOST:8080       # explicit one-off servic
 Annotation records carry a project id plus branch. The project id comes from
 `[repo].name`, Git remote/common-dir identity, or the project path fallback;
 set `[repo].name` for stable sync across non-Git copies. `sync` resolves the
-service address from `--server`, `GRAPHA_ANNOTATION_SERVER`, then
-`[annotations].server`. `list` and `sync` use the current directory by default;
-pass `--path` only when operating on another project.
+service address from `--server`, `GRAPHA_ANNOTATION_SERVER`, project
+`grapha.toml`, then global Grapha config. `list` and `sync` use the current
+directory by default; pass `--path` only when operating on another project.
 
 ### Dataflow
 
@@ -271,6 +271,11 @@ terminal = "persistence"
 direction = "write"
 operation = "set"
 ```
+
+Global developer defaults can live in `$GRAPHA_CONFIG`,
+`$XDG_CONFIG_HOME/grapha/config.toml`, `~/.config/grapha/config.toml`, or
+`~/.grapha/config.toml`. Project `grapha.toml` overrides global config for
+repo-specific values such as `[annotations].server`.
 
 ## Architecture
 

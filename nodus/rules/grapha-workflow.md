@@ -13,5 +13,6 @@
 - Prefer annotations for expensive-to-rediscover facts: ownership, business role, invariants, dataflow meaning, migration notes, or cross-module coupling
 - Do not annotate guesses, obvious symbol names, or temporary task-local scratch context
 - Use `grapha annotation serve`, `grapha annotation list`, and `grapha annotation sync` when sharing annotation knowledge across local machines
-- Configure annotation sync with `[annotations].server` in `grapha.toml`, `GRAPHA_ANNOTATION_SERVER`, or an explicit `--server` override
+- Configure annotation sync with `[annotations].server` in project/global Grapha config, `GRAPHA_ANNOTATION_SERVER`, or an explicit `--server` override
+- Use `$XDG_CONFIG_HOME/grapha/config.toml`, `~/.config/grapha/config.toml`, or `~/.grapha/config.toml` for developer-level Grapha defaults
 - Prefer setting `[repo].name` in `grapha.toml` before syncing non-Git project copies that should share the same annotation identity

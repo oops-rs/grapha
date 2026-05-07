@@ -276,7 +276,7 @@ enum AnnotationCommands {
     /// Bidirectionally sync annotations with a Grapha annotation service
     Sync {
         /// Annotation service base URL, e.g. http://192.168.1.10:8080.
-        /// Defaults to GRAPHA_ANNOTATION_SERVER or grapha.toml [annotations].server.
+        /// Defaults to GRAPHA_ANNOTATION_SERVER, project grapha.toml, or global Grapha config.
         #[arg(long)]
         server: Option<String>,
         /// Project directory

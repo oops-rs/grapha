@@ -10,7 +10,8 @@ Use Grapha's annotation commands based on the requested action:
 - To sync with another local Grapha annotation service: `grapha annotation sync`
 - To override the configured service for one sync: `grapha annotation sync --server http://HOST:8080`
 
-`grapha annotation sync` resolves the service address from `--server`, then `GRAPHA_ANNOTATION_SERVER`, then `[annotations].server` in `grapha.toml`.
+`grapha annotation sync` resolves the service address from `--server`, then `GRAPHA_ANNOTATION_SERVER`, then project `grapha.toml`, then global Grapha config.
+Global config can live at `$GRAPHA_CONFIG`, `$XDG_CONFIG_HOME/grapha/config.toml`, `~/.config/grapha/config.toml`, or `~/.grapha/config.toml`.
 `grapha annotation list` and `grapha annotation sync` use the current directory by default; pass `--path` only when operating on another project.
 
 Record an annotation when the note is compact, factual, and likely to save future agents from rereading files: ownership, business meaning, invariants, migration context, or non-obvious dependencies are good candidates. Avoid recording guesses, obvious restatements of the symbol name, or temporary task scratch.
