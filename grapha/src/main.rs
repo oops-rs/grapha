@@ -261,16 +261,16 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum AnnotationCommands {
-    /// Launch the Grapha HTTP service with annotation API routes enabled
+    /// Launch the standalone Grapha HTTP annotation service
     Serve {
-        /// Project directory
-        #[arg(short, long, default_value = ".")]
+        /// Deprecated; annotation service is global and ignores project path
+        #[arg(short, long, default_value = ".", hide = true)]
         path: PathBuf,
         /// Port to listen on
         #[arg(long, default_value = "8080")]
         port: u16,
-        /// Watch for file changes and auto-update the graph
-        #[arg(long)]
+        /// Deprecated; annotation service has no project watcher
+        #[arg(long, hide = true)]
         watch: bool,
     },
     /// Bidirectionally sync annotations with a Grapha annotation service

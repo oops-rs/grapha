@@ -33,13 +33,14 @@ Use grapha's code intelligence to navigate, understand, and assess codebases bef
 
 - Record an annotation when you discover reusable symbol knowledge that would be expensive to re-derive later, such as ownership, business role, invariants, cross-module coupling, or migration context. This can reduce future token usage by letting agents retrieve a compact note instead of rereading surrounding files.
 - Keep annotations concise and factual. Do not annotate transient guesses, obvious names, or task-local scratch notes.
-- `grapha annotation serve -p . --port 8080` — deploy the local HTTP annotation service; the Grapha HTTP server binds for LAN access
+- `grapha annotation serve --port 8080` — deploy the standalone local HTTP annotation service; it binds for LAN access and does not require `grapha index`
 - `grapha annotation list` — inspect local annotation records and their project/branch identity
 - `grapha annotation sync` — pull, merge, and push annotations against the configured Grapha annotation service
 - `grapha annotation sync --server http://HOST:8080` — override the configured service for one sync
 - `grapha annotation sync` resolves the service address from `--server`, then `GRAPHA_ANNOTATION_SERVER`, then project `grapha.toml`, then global Grapha config.
 - Global config can live at `$GRAPHA_CONFIG`, `$XDG_CONFIG_HOME/grapha/config.toml`, `~/.config/grapha/config.toml`, or `~/.grapha/config.toml`.
 - `list` and `sync` use the current directory by default; pass `--path` only when operating on another project.
+- `annotation serve` is not bound to one project; sync requests carry project identity so records are routed into the right global annotation store.
 - Annotation records are scoped by project id and branch, while retaining fallback behavior for legacy/shared records. Set `[repo].name` in `grapha.toml` when syncing non-Git copies that should share one project identity.
 
 ## Dataflow tracing

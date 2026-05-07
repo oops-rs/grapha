@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::annotations::{AnnotationStore, SymbolAnnotationRecord};
+use crate::data_paths::ProjectIdentity;
 
 #[derive(Debug, Serialize)]
 pub struct AnnotationSyncReport {
@@ -72,12 +73,13 @@ impl HttpEndpoint {
 
 pub fn sync_annotations(project_root: &Path, server: &str) -> anyhow::Result<AnnotationSyncReport> {
     let endpoint = HttpEndpoint::parse(server)?;
+    let project = crate::data_paths::project_identity(project_root);
     let store = AnnotationStore::for_project_root(project_root);
-    let remote_before = fetch_remote_annotations(&endpoint)?;
+    let remote_before = fetch_remote_annotations(&endpoint, &project.project_id)?;
     let remote_total = remote_before.len();
     let pulled = store.merge_records(&remote_before)?;
     let local_after = store.list_records()?;
-    let pushed = push_remote_annotations(&endpoint, &local_after)?;
+    let pushed = push_remote_annotations(&endpoint, &project, &local_after)?;
 
     Ok(AnnotationSyncReport {
         pulled,
@@ -89,17 +91,26 @@ pub fn sync_annotations(project_root: &Path, server: &str) -> anyhow::Result<Ann
 
 fn fetch_remote_annotations(
     endpoint: &HttpEndpoint,
+    project_id: &str,
 ) -> anyhow::Result<Vec<SymbolAnnotationRecord>> {
-    let body = request(endpoint, "GET", "/api/annotations", None)?;
+    let path = format!(
+        "/api/annotations?project_id={}",
+        urlencoding::encode(project_id)
+    );
+    let body = request(endpoint, "GET", &path, None)?;
     let response: AnnotationListResponse = serde_json::from_str(&body)?;
     Ok(response.annotations)
 }
 
 fn push_remote_annotations(
     endpoint: &HttpEndpoint,
+    project: &ProjectIdentity,
     records: &[SymbolAnnotationRecord],
 ) -> anyhow::Result<usize> {
-    let payload = serde_json::json!({ "annotations": records });
+    let payload = serde_json::json!({
+        "project": project,
+        "annotations": records
+    });
     let body = request(
         endpoint,
         "POST",

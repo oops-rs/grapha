@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -9,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::fields::FieldSet;
 use crate::query;
 
-use super::AppState;
+use super::{AnnotationServiceState, AppState};
 
 pub async fn get_graph(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(serde_json::to_value(&state.graph).unwrap_or_default())
@@ -175,7 +176,14 @@ pub struct AnnotationUpsertRequest {
 
 #[derive(Deserialize)]
 pub struct AnnotationSyncRequest {
+    #[serde(default)]
+    pub project: Option<crate::data_paths::ProjectIdentity>,
     pub annotations: Vec<crate::annotations::SymbolAnnotationRecord>,
+}
+
+#[derive(Deserialize)]
+pub struct StandaloneAnnotationListParams {
+    pub project_id: Option<String>,
 }
 
 fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
@@ -275,11 +283,125 @@ pub async fn sync_annotations(
     }
 }
 
+fn request_project_id(
+    project_id: Option<&str>,
+    records: &[crate::annotations::SymbolAnnotationRecord],
+) -> anyhow::Result<String> {
+    if let Some(project_id) = project_id.and_then(non_empty) {
+        return Ok(project_id.to_string());
+    }
+    records
+        .iter()
+        .find_map(|record| non_empty(&record.project_id))
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("project_id query parameter is required"))
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+pub async fn list_standalone_annotations(
+    State(state): State<Arc<AnnotationServiceState>>,
+    Query(params): Query<StandaloneAnnotationListParams>,
+) -> Response {
+    let project_id = match request_project_id(params.project_id.as_deref(), &[]) {
+        Ok(project_id) => project_id,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    let store = match crate::annotations::AnnotationStore::for_project_id_with_data_root(
+        &project_id,
+        &state.data_root,
+    ) {
+        Ok(store) => store,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+
+    match store.list_records() {
+        Ok(records) => {
+            let total = records.len();
+            Json(serde_json::json!({
+                "project": {
+                    "project_id": project_id,
+                },
+                "annotations": records,
+                "total": total
+            }))
+            .into_response()
+        }
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to load annotations: {error}"),
+        ),
+    }
+}
+
+pub async fn sync_standalone_annotations(
+    State(state): State<Arc<AnnotationServiceState>>,
+    Json(payload): Json<AnnotationSyncRequest>,
+) -> Response {
+    let fallback_project_id = payload
+        .project
+        .as_ref()
+        .map(|project| project.project_id.as_str());
+    let fallback_branch = payload
+        .project
+        .as_ref()
+        .map(|project| project.branch.as_str());
+    let mut grouped: BTreeMap<String, Vec<crate::annotations::SymbolAnnotationRecord>> =
+        BTreeMap::new();
+
+    for mut record in payload.annotations {
+        let project_id =
+            match request_project_id(fallback_project_id, std::slice::from_ref(&record)) {
+                Ok(project_id) => project_id,
+                Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
+            };
+        if record.project_id.trim().is_empty() {
+            record.project_id = project_id.clone();
+        }
+        if record.branch.trim().is_empty()
+            && let Some(branch) = fallback_branch.and_then(non_empty)
+        {
+            record.branch = branch.to_string();
+        }
+        grouped.entry(project_id).or_default().push(record);
+    }
+
+    let received = grouped.values().map(Vec::len).sum::<usize>();
+    let mut merged = 0usize;
+    for (project_id, records) in grouped {
+        let store = match crate::annotations::AnnotationStore::for_project_id_with_data_root(
+            &project_id,
+            &state.data_root,
+        ) {
+            Ok(store) => store,
+            Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
+        };
+        match store.merge_records(&records) {
+            Ok(count) => merged += count,
+            Err(error) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("failed to merge annotations: {error}"),
+                );
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "merged": merged,
+        "received": received
+    }))
+    .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::search;
-    use crate::serve::AppState;
+    use crate::serve::{AnnotationServiceState, AppState};
     use grapha_core::graph::{Edge, EdgeKind, Graph, Node, NodeKind, NodeRole, Span, Visibility};
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -351,6 +473,24 @@ mod tests {
         )
     }
 
+    fn annotation_record(
+        project_id: &str,
+        branch: &str,
+        symbol_key: &str,
+    ) -> crate::annotations::SymbolAnnotationRecord {
+        crate::annotations::SymbolAnnotationRecord {
+            project_id: project_id.to_string(),
+            branch: branch.to_string(),
+            repo: String::new(),
+            symbol_key: symbol_key.to_string(),
+            text: "Explains a reusable invariant.".to_string(),
+            created_by: Some("test".to_string()),
+            created_at: "1".to_string(),
+            updated_at: "2".to_string(),
+            symbol_fingerprint: None,
+        }
+    }
+
     #[tokio::test]
     async fn search_api_applies_filters_and_context() {
         let (state, _dir) = make_state();
@@ -383,5 +523,47 @@ mod tests {
         assert_eq!(result["snippet"], "fn main() { helper(); }");
         assert!(result.get("file").is_none());
         assert_eq!(result["calls"][0], "app::helper");
+    }
+
+    #[tokio::test]
+    async fn standalone_annotation_sync_routes_records_by_project_id() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(AnnotationServiceState {
+            data_root: dir.path().to_path_buf(),
+        });
+        let response = sync_standalone_annotations(
+            State(state.clone()),
+            Json(AnnotationSyncRequest {
+                project: None,
+                annotations: vec![annotation_record("remote-demo", "main", "s:DemoUSR")],
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let store = crate::annotations::AnnotationStore::for_project_id_with_data_root(
+            "remote-demo",
+            dir.path(),
+        )
+        .unwrap();
+        let records = store.list_records().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].project_id, "remote-demo");
+        assert_eq!(records[0].branch, "main");
+    }
+
+    #[tokio::test]
+    async fn standalone_annotation_list_requires_project_id() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(AnnotationServiceState {
+            data_root: dir.path().to_path_buf(),
+        });
+        let response = list_standalone_annotations(
+            State(state),
+            Query(StandaloneAnnotationListParams { project_id: None }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

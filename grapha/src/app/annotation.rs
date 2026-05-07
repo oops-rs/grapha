@@ -37,8 +37,17 @@ fn resolve_sync_server_from(
 
 pub(crate) fn handle_annotation_command(command: AnnotationCommands) -> anyhow::Result<()> {
     match command {
-        AnnotationCommands::Serve { path, port, watch } => {
-            crate::app::serve::handle_serve(path, port, false, watch)
+        AnnotationCommands::Serve {
+            path: _,
+            port,
+            watch,
+        } => {
+            if watch {
+                eprintln!("annotation service is standalone; --watch is accepted but ignored");
+            }
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(crate::serve::run_annotation_service(port))?;
+            Ok(())
         }
         AnnotationCommands::Sync { server, path } => {
             let server = resolve_sync_server(&path, server)?;

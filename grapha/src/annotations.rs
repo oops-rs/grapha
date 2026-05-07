@@ -172,6 +172,24 @@ impl AnnotationStore {
         }
     }
 
+    pub fn for_project_id_with_data_root(
+        project_id: &str,
+        data_root: &Path,
+    ) -> anyhow::Result<Self> {
+        let project_id = validate_project_id(project_id)?;
+        Ok(Self {
+            path: data_root
+                .join("repos")
+                .join(project_id)
+                .join("annotations.db"),
+            import_from: None,
+            identity: AnnotationIdentity {
+                project_id: project_id.to_string(),
+                branch: String::new(),
+            },
+        })
+    }
+
     #[allow(dead_code)]
     pub fn for_store_dir(store_dir: &Path) -> Self {
         Self::new(store_dir.join("annotations.db"))
@@ -530,6 +548,20 @@ fn record_key(project_id: &str, branch: &str, repo: &str, symbol_key: &str) -> A
     )
 }
 
+fn validate_project_id(project_id: &str) -> anyhow::Result<&str> {
+    let project_id = project_id.trim();
+    if project_id.is_empty() {
+        anyhow::bail!("project_id cannot be empty");
+    }
+    if !project_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        anyhow::bail!("project_id contains unsupported characters");
+    }
+    Ok(project_id)
+}
+
 fn create_tables(conn: &Connection) -> anyhow::Result<()> {
     migrate_legacy_symbol_annotations(conn)?;
     conn.execute_batch(
@@ -853,6 +885,31 @@ mod tests {
                 branch: branch.to_string(),
             },
         }
+    }
+
+    #[test]
+    fn store_for_project_id_uses_global_repo_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            AnnotationStore::for_project_id_with_data_root("remote-abc123", dir.path()).unwrap();
+
+        assert_eq!(
+            store.path,
+            dir.path()
+                .join("repos")
+                .join("remote-abc123")
+                .join("annotations.db")
+        );
+        assert_eq!(store.identity.project_id, "remote-abc123");
+    }
+
+    #[test]
+    fn store_for_project_id_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let error =
+            AnnotationStore::for_project_id_with_data_root("../other", dir.path()).unwrap_err();
+
+        assert!(error.to_string().contains("unsupported characters"));
     }
 
     #[test]

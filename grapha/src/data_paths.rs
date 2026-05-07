@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use git2::Repository;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
@@ -26,7 +26,7 @@ pub fn annotation_db_path_with_data_root(project_root: &Path, data_root: &Path) 
         .join("annotations.db")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectIdentity {
     pub project_id: String,
     pub branch: String,
