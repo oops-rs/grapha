@@ -158,12 +158,14 @@ fn extract_swift_framework_nodes(result: &mut ExtractionResult, source: &[u8], f
             result,
             file,
             source,
-            NodeKind::Component,
-            "component",
-            name,
-            full_match.start(),
-            full_match.end(),
-            framework_metadata("component", None, None),
+            FrameworkNodeSpec {
+                kind: NodeKind::Component,
+                id_prefix: "component",
+                name,
+                start_byte: full_match.start(),
+                end_byte: full_match.end(),
+                metadata: framework_metadata("component", None, None),
+            },
         );
     }
 
@@ -245,37 +247,44 @@ fn push_swift_route_node(
         result,
         file,
         source,
-        NodeKind::Route,
-        "route",
-        &name,
-        start_byte,
-        end_byte,
-        framework_metadata("route", Some(&method), Some(path)),
+        FrameworkNodeSpec {
+            kind: NodeKind::Route,
+            id_prefix: "route",
+            name: &name,
+            start_byte,
+            end_byte,
+            metadata: framework_metadata("route", Some(&method), Some(path)),
+        },
     );
+}
+
+struct FrameworkNodeSpec<'a> {
+    kind: NodeKind,
+    id_prefix: &'a str,
+    name: &'a str,
+    start_byte: usize,
+    end_byte: usize,
+    metadata: HashMap<String, String>,
 }
 
 fn push_framework_node(
     result: &mut ExtractionResult,
     file: &str,
     source: &[u8],
-    kind: NodeKind,
-    id_prefix: &str,
-    name: &str,
-    start_byte: usize,
-    end_byte: usize,
-    mut metadata: HashMap<String, String>,
+    spec: FrameworkNodeSpec<'_>,
 ) {
-    let span = span_from_byte_range(source, start_byte, end_byte);
+    let span = span_from_byte_range(source, spec.start_byte, spec.end_byte);
     let line = span.start[0] + 1;
-    let id = format!("{id_prefix}:{file}:{name}:{line}");
+    let id = format!("{}:{file}:{}:{line}", spec.id_prefix, spec.name);
     if result.nodes.iter().any(|node| node.id == id) {
         return;
     }
+    let mut metadata = spec.metadata;
     metadata.insert("language".to_string(), "swift".to_string());
     result.nodes.push(Node {
         id,
-        kind,
-        name: name.to_string(),
+        kind: spec.kind,
+        name: spec.name.to_string(),
         file: file.into(),
         span,
         visibility: Visibility::Public,

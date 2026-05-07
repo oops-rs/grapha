@@ -119,7 +119,7 @@ pub(crate) fn is_swiftui_invalidation_source(node: &Node) -> bool {
 fn kind_preference(kind: NodeKind) -> usize {
     match kind {
         NodeKind::Function | NodeKind::Method | NodeKind::Route => 0,
-        NodeKind::Property | NodeKind::Variable | NodeKind::Component => 1,
+        NodeKind::Property | NodeKind::Variable => 1,
         NodeKind::Variant | NodeKind::EnumMember | NodeKind::Field | NodeKind::Parameter => 2,
         NodeKind::Class
         | NodeKind::Struct
@@ -131,7 +131,7 @@ fn kind_preference(kind: NodeKind) -> usize {
         | NodeKind::TypeAlias
         | NodeKind::Protocol => 3,
         NodeKind::Impl | NodeKind::Extension | NodeKind::Import | NodeKind::Export => 4,
-        NodeKind::File | NodeKind::View | NodeKind::Branch => 5,
+        NodeKind::File | NodeKind::Component | NodeKind::View | NodeKind::Branch => 5,
     }
 }
 
@@ -693,6 +693,32 @@ mod tests {
                     "ContentView.swift::ContentView::body::view:Row@10:12",
                     "Row",
                     NodeKind::View,
+                    "ContentView.swift",
+                ),
+                make_node(
+                    "ContentView.swift::Row",
+                    "Row",
+                    NodeKind::Struct,
+                    "ContentView.swift",
+                ),
+            ],
+            edges: vec![],
+        };
+
+        let resolved = resolve_node(&graph, "Row").unwrap();
+        assert_eq!(resolved.kind, NodeKind::Struct);
+        assert_eq!(resolved.id, "ContentView.swift::Row");
+    }
+
+    #[test]
+    fn bare_symbol_prefers_real_declarations_over_framework_components() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                make_node(
+                    "component:ContentView.swift:Row:1",
+                    "Row",
+                    NodeKind::Component,
                     "ContentView.swift",
                 ),
                 make_node(
