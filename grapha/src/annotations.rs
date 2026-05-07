@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::data_paths::ProjectIdentity;
 
+const SHARED_BRANCH: &str = "";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolAnnotationRecord {
     pub project_id: String,
@@ -44,14 +46,12 @@ pub struct AnnotationIndex {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct AnnotationIdentity {
     project_id: String,
-    branch: String,
 }
 
 impl From<ProjectIdentity> for AnnotationIdentity {
     fn from(identity: ProjectIdentity) -> Self {
         Self {
             project_id: identity.project_id,
-            branch: identity.branch,
         }
     }
 }
@@ -94,22 +94,26 @@ impl AnnotationIndex {
 
     fn record_for_node(&self, node: &Node) -> Option<&SymbolAnnotationRecord> {
         let project_id = self.identity.project_id.as_str();
-        let branch = self.identity.branch.as_str();
         let repo = repo_key(node);
         let symbol_key = symbol_key(node);
 
-        let exact_key = record_key(project_id, branch, repo, symbol_key);
-        if let Some(record) = self.records.get(&exact_key) {
+        let shared_key = record_key(project_id, SHARED_BRANCH, repo, symbol_key);
+        if let Some(record) = self.records.get(&shared_key) {
             return Some(record);
         }
 
-        let legacy_key = record_key(project_id, "", repo, symbol_key);
-        if let Some(record) = self.records.get(&legacy_key) {
+        if let Some(record) =
+            self.latest_record_for_project_repo_symbol(project_id, repo, symbol_key)
+        {
             return Some(record);
         }
 
-        let global_legacy_key = record_key("", "", repo, symbol_key);
+        let global_legacy_key = record_key("", SHARED_BRANCH, repo, symbol_key);
         if let Some(record) = self.records.get(&global_legacy_key) {
+            return Some(record);
+        }
+
+        if let Some(record) = self.latest_record_for_project_repo_symbol("", repo, symbol_key) {
             return Some(record);
         }
 
@@ -128,6 +132,22 @@ impl AnnotationIndex {
                 None
             }
         }
+    }
+
+    fn latest_record_for_project_repo_symbol(
+        &self,
+        project_id: &str,
+        repo: &str,
+        symbol_key: &str,
+    ) -> Option<&SymbolAnnotationRecord> {
+        self.records
+            .values()
+            .filter(|record| {
+                record.project_id == project_id
+                    && record.repo == repo
+                    && record.symbol_key == symbol_key
+            })
+            .max_by(|left, right| compare_project_scoped_records(left, right))
     }
 }
 
@@ -185,7 +205,6 @@ impl AnnotationStore {
             import_from: None,
             identity: AnnotationIdentity {
                 project_id: project_id.to_string(),
-                branch: String::new(),
             },
         })
     }
@@ -218,11 +237,6 @@ impl AnnotationStore {
             .as_ref()
             .map(|record| record.project_id.as_str())
             .unwrap_or(self.identity.project_id.as_str());
-        let storage_branch = existing_record
-            .as_ref()
-            .filter(|record| record.branch == self.identity.branch)
-            .map(|record| record.branch.as_str())
-            .unwrap_or(self.identity.branch.as_str());
         let key = symbol_key(node);
         let now = current_timestamp();
         let created_at = existing_record
@@ -243,7 +257,7 @@ impl AnnotationStore {
                 symbol_fingerprint = excluded.symbol_fingerprint",
             params![
                 storage_project_id,
-                storage_branch,
+                SHARED_BRANCH,
                 storage_repo,
                 key,
                 text,
@@ -253,8 +267,9 @@ impl AnnotationStore {
                 fingerprint,
             ],
         )?;
+        delete_branch_variants(&conn, storage_project_id, storage_repo, key)?;
 
-        let record = read_record(&conn, storage_project_id, storage_branch, storage_repo, key)?
+        let record = read_record(&conn, storage_project_id, SHARED_BRANCH, storage_repo, key)?
             .ok_or_else(|| anyhow::anyhow!("annotation was not saved for symbol key {key}"))?;
         Ok(record.view_for_node(node))
     }
@@ -310,9 +325,10 @@ impl AnnotationStore {
              ORDER BY updated_at DESC, symbol_key ASC",
         )?;
         let mut rows = stmt.query(params![self.identity.project_id.as_str()])?;
-        let mut records = Vec::new();
+        let mut records_by_key: HashMap<(String, String, String), SymbolAnnotationRecord> =
+            HashMap::new();
         while let Some(row) = rows.next()? {
-            records.push(SymbolAnnotationRecord {
+            let record = SymbolAnnotationRecord {
                 project_id: row.get(0)?,
                 branch: row.get(1)?,
                 repo: row.get(2)?,
@@ -322,8 +338,27 @@ impl AnnotationStore {
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
                 symbol_fingerprint: row.get(8)?,
-            });
+            };
+            let key = (
+                record.project_id.clone(),
+                record.repo.clone(),
+                record.symbol_key.clone(),
+            );
+            records_by_key
+                .entry(key)
+                .and_modify(|existing| {
+                    if should_replace_project_scoped_record(existing, &record) {
+                        *existing = record.clone();
+                    }
+                })
+                .or_insert(record);
         }
+        let mut records = records_by_key.into_values().collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            timestamp_rank(&right.updated_at)
+                .cmp(&timestamp_rank(&left.updated_at))
+                .then_with(|| left.symbol_key.cmp(&right.symbol_key))
+        });
         Ok(records)
     }
 
@@ -351,12 +386,13 @@ impl AnnotationStore {
             } else {
                 record.project_id.as_str()
             };
-            let branch = record.branch.as_str();
+            let branch = SHARED_BRANCH;
             let repo = record.repo.as_str();
             let symbol_key = record.symbol_key.as_str();
 
-            if let Some(existing) = read_record(&conn, project_id, branch, repo, symbol_key)?
-                && timestamp_rank(&existing.updated_at) > timestamp_rank(&record.updated_at)
+            if let Some(existing) =
+                read_record_by_project_repo_symbol(&conn, project_id, repo, symbol_key)?
+                && compare_project_scoped_records(&existing, record).is_gt()
             {
                 continue;
             }
@@ -384,6 +420,7 @@ impl AnnotationStore {
                     record.symbol_fingerprint.as_deref(),
                 ],
             )?;
+            delete_branch_variants(&conn, project_id, repo, symbol_key)?;
             merged += 1;
         }
 
@@ -502,6 +539,7 @@ impl AnnotationStore {
                 ],
             )?;
         }
+        normalize_branch_scoped_annotations(conn)?;
         mark_imported(conn, &source_id, source_path)?;
         Ok(())
     }
@@ -585,6 +623,7 @@ fn create_tables(conn: &Connection) -> anyhow::Result<()> {
             imported_at TEXT NOT NULL
         );",
     )?;
+    normalize_branch_scoped_annotations(conn)?;
     Ok(())
 }
 
@@ -639,24 +678,29 @@ fn read_record_for_node(
     if let Some(record) = read_record(
         conn,
         &identity.project_id,
-        &identity.branch,
+        SHARED_BRANCH,
         repo_key(node),
         symbol_key(node),
     )? {
         return Ok(Some(record));
     }
 
-    if let Some(record) = read_record(
+    if let Some(record) = read_record_by_project_repo_symbol(
         conn,
         &identity.project_id,
-        "",
         repo_key(node),
         symbol_key(node),
     )? {
         return Ok(Some(record));
     }
 
-    if let Some(record) = read_record(conn, "", "", repo_key(node), symbol_key(node))? {
+    if let Some(record) = read_record(conn, "", SHARED_BRANCH, repo_key(node), symbol_key(node))? {
+        return Ok(Some(record));
+    }
+
+    if let Some(record) =
+        read_record_by_project_repo_symbol(conn, "", repo_key(node), symbol_key(node))?
+    {
         return Ok(Some(record));
     }
 
@@ -689,17 +733,7 @@ fn read_unique_record_for_project(
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
-    let record = SymbolAnnotationRecord {
-        project_id: row.get(0)?,
-        branch: row.get(1)?,
-        repo: row.get(2)?,
-        symbol_key: row.get(3)?,
-        text: row.get(4)?,
-        created_by: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
-        symbol_fingerprint: row.get(8)?,
-    };
+    let record = record_from_row(row)?;
     if rows.next()?.is_some() {
         return Ok(None);
     }
@@ -720,21 +754,149 @@ fn read_record(
              FROM symbol_annotations
              WHERE project_id = ?1 AND branch = ?2 AND repo = ?3 AND symbol_key = ?4",
             params![project_id, branch, repo, symbol_key],
-            |row| {
-                Ok(SymbolAnnotationRecord {
-                    project_id: row.get(0)?,
-                    branch: row.get(1)?,
-                    repo: row.get(2)?,
-                    symbol_key: row.get(3)?,
-                    text: row.get(4)?,
-                    created_by: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                    symbol_fingerprint: row.get(8)?,
-                })
-            },
+            record_from_row,
         )
         .optional()?)
+}
+
+fn read_record_by_project_repo_symbol(
+    conn: &Connection,
+    project_id: &str,
+    repo: &str,
+    symbol_key: &str,
+) -> anyhow::Result<Option<SymbolAnnotationRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT project_id, branch, repo, symbol_key, annotation, created_by,
+                created_at, updated_at, symbol_fingerprint
+         FROM symbol_annotations
+         WHERE project_id = ?1 AND repo = ?2 AND symbol_key = ?3",
+    )?;
+    let mut rows = stmt.query(params![project_id, repo, symbol_key])?;
+    let mut best = None::<SymbolAnnotationRecord>;
+    while let Some(row) = rows.next()? {
+        let record = record_from_row(row)?;
+        match &best {
+            Some(existing) if !should_replace_project_scoped_record(existing, &record) => {}
+            _ => best = Some(record),
+        }
+    }
+    Ok(best)
+}
+
+fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolAnnotationRecord> {
+    Ok(SymbolAnnotationRecord {
+        project_id: row.get(0)?,
+        branch: row.get(1)?,
+        repo: row.get(2)?,
+        symbol_key: row.get(3)?,
+        text: row.get(4)?,
+        created_by: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+        symbol_fingerprint: row.get(8)?,
+    })
+}
+
+fn compare_project_scoped_records(
+    left: &SymbolAnnotationRecord,
+    right: &SymbolAnnotationRecord,
+) -> std::cmp::Ordering {
+    timestamp_rank(&left.updated_at)
+        .cmp(&timestamp_rank(&right.updated_at))
+        .then_with(|| (left.branch == SHARED_BRANCH).cmp(&(right.branch == SHARED_BRANCH)))
+        .then_with(|| timestamp_rank(&left.created_at).cmp(&timestamp_rank(&right.created_at)))
+        .then_with(|| left.branch.cmp(&right.branch))
+}
+
+fn should_replace_project_scoped_record(
+    existing: &SymbolAnnotationRecord,
+    candidate: &SymbolAnnotationRecord,
+) -> bool {
+    compare_project_scoped_records(candidate, existing).is_gt()
+}
+
+fn delete_branch_variants(
+    conn: &Connection,
+    project_id: &str,
+    repo: &str,
+    symbol_key: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM symbol_annotations
+         WHERE project_id = ?1 AND repo = ?2 AND symbol_key = ?3 AND branch <> ?4",
+        params![project_id, repo, symbol_key, SHARED_BRANCH],
+    )?;
+    Ok(())
+}
+
+fn normalize_branch_scoped_annotations(conn: &Connection) -> anyhow::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT project_id, branch, repo, symbol_key, annotation, created_by,
+                created_at, updated_at, symbol_fingerprint
+         FROM symbol_annotations",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut records_by_key: HashMap<(String, String, String), (SymbolAnnotationRecord, bool)> =
+        HashMap::new();
+
+    while let Some(row) = rows.next()? {
+        let record = record_from_row(row)?;
+        let has_branch_variant = record.branch != SHARED_BRANCH;
+        let key = (
+            record.project_id.clone(),
+            record.repo.clone(),
+            record.symbol_key.clone(),
+        );
+        records_by_key
+            .entry(key)
+            .and_modify(|(existing, saw_branch_variant)| {
+                *saw_branch_variant |= has_branch_variant;
+                if should_replace_project_scoped_record(existing, &record) {
+                    *existing = record.clone();
+                }
+            })
+            .or_insert((record, has_branch_variant));
+    }
+    drop(rows);
+    drop(stmt);
+
+    for (_, (mut record, saw_branch_variant)) in records_by_key {
+        if !saw_branch_variant {
+            continue;
+        }
+        record.branch = SHARED_BRANCH.to_string();
+        conn.execute(
+            "INSERT INTO symbol_annotations (
+                project_id, branch, repo, symbol_key, annotation, created_by,
+                created_at, updated_at, symbol_fingerprint
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(project_id, branch, repo, symbol_key) DO UPDATE SET
+                annotation = excluded.annotation,
+                created_by = excluded.created_by,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
+                symbol_fingerprint = excluded.symbol_fingerprint",
+            params![
+                record.project_id.as_str(),
+                SHARED_BRANCH,
+                record.repo.as_str(),
+                record.symbol_key.as_str(),
+                record.text.as_str(),
+                record.created_by.as_deref(),
+                record.created_at.as_str(),
+                record.updated_at.as_str(),
+                record.symbol_fingerprint.as_deref(),
+            ],
+        )?;
+        delete_branch_variants(
+            conn,
+            record.project_id.as_str(),
+            record.repo.as_str(),
+            record.symbol_key.as_str(),
+        )?;
+    }
+
+    Ok(())
 }
 
 fn current_timestamp() -> String {
@@ -876,13 +1038,12 @@ mod tests {
         }
     }
 
-    fn store_for_branch(root: &Path, branch: &str) -> AnnotationStore {
+    fn store_for_project(root: &Path) -> AnnotationStore {
         AnnotationStore {
             path: root.join("annotations.db"),
             import_from: None,
             identity: AnnotationIdentity {
                 project_id: "demo-project".to_string(),
-                branch: branch.to_string(),
             },
         }
     }
@@ -946,11 +1107,11 @@ mod tests {
     }
 
     #[test]
-    fn branch_specific_annotation_overrides_shared_fallback() {
+    fn annotations_are_shared_across_branches_for_project() {
         let dir = tempfile::tempdir().unwrap();
-        let main_store = store_for_branch(dir.path(), "main");
-        let feature_store = store_for_branch(dir.path(), "feature");
-        let other_store = store_for_branch(dir.path(), "other");
+        let main_store = store_for_project(dir.path());
+        let feature_store = store_for_project(dir.path());
+        let other_store = store_for_project(dir.path());
         let node = node();
 
         main_store
@@ -958,7 +1119,7 @@ mod tests {
             .unwrap();
         let shared = feature_store.get_for_node(&node).unwrap().unwrap();
         assert_eq!(shared.text, "Main branch explanation.");
-        assert_eq!(shared.branch, "main");
+        assert_eq!(shared.branch, "");
 
         feature_store
             .upsert_for_node(&node, "Feature branch explanation.", Some("codex"))
@@ -966,16 +1127,19 @@ mod tests {
 
         let main = main_store.get_for_node(&node).unwrap().unwrap();
         let feature = feature_store.get_for_node(&node).unwrap().unwrap();
-        assert_eq!(main.text, "Main branch explanation.");
+        let other = other_store.get_for_node(&node).unwrap().unwrap();
+        assert_eq!(main.text, "Feature branch explanation.");
         assert_eq!(feature.text, "Feature branch explanation.");
-        assert_eq!(feature.branch, "feature");
-        assert!(other_store.get_for_node(&node).unwrap().is_none());
+        assert_eq!(other.text, "Feature branch explanation.");
+        assert_eq!(main.branch, "");
+        assert_eq!(feature.branch, "");
+        assert_eq!(other.branch, "");
     }
 
     #[test]
     fn merge_records_keeps_newer_annotation() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store_for_branch(dir.path(), "main");
+        let store = store_for_project(dir.path());
         let mut record = SymbolAnnotationRecord {
             project_id: "demo-project".to_string(),
             branch: "main".to_string(),
@@ -995,7 +1159,42 @@ mod tests {
 
         let loaded = store.get_for_node(&node()).unwrap().unwrap();
         assert_eq!(loaded.text, "Newer synced note.");
-        assert_eq!(loaded.branch, "main");
+        assert_eq!(loaded.branch, "");
+    }
+
+    #[test]
+    fn branch_scoped_rows_are_normalized_to_project_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("annotations.db");
+        let conn = Connection::open(&db_path).unwrap();
+        create_tables(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO symbol_annotations (
+                project_id, branch, repo, symbol_key, annotation, created_by,
+                created_at, updated_at, symbol_fingerprint
+            ) VALUES ('demo-project', 'main', '', 's:DemoUSR', 'Main note.', 'old', '1', '10', NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbol_annotations (
+                project_id, branch, repo, symbol_key, annotation, created_by,
+                created_at, updated_at, symbol_fingerprint
+            ) VALUES ('demo-project', 'feature', '', 's:DemoUSR', 'Feature note.', 'new', '2', '20', NULL)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = store_for_project(dir.path());
+        let loaded = store.get_for_node(&node()).unwrap().unwrap();
+        assert_eq!(loaded.text, "Feature note.");
+        assert_eq!(loaded.branch, "");
+
+        let records = store.list_records().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].text, "Feature note.");
+        assert_eq!(records[0].branch, "");
     }
 
     #[test]
@@ -1026,7 +1225,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let store = store_for_branch(dir.path(), "main");
+        let store = store_for_project(dir.path());
         let loaded = store.get_for_node(&node()).unwrap().unwrap();
         assert_eq!(loaded.text, "Legacy global note.");
         assert_eq!(loaded.project_id, "");

@@ -168,15 +168,16 @@ grapha annotation sync                                 # sync with configured an
 grapha annotation sync --server http://HOST:8080       # explicit one-off service override
 ```
 
-Annotation records carry a project id plus branch. The project id comes from
-`[repo].name`, Git remote/common-dir identity, or the project path fallback;
-set `[repo].name` for stable sync across non-Git copies. `sync` resolves the
-service address from `--server`, `GRAPHA_ANNOTATION_SERVER`, project
-`grapha.toml`, then global Grapha config. `list` and `sync` use the current
-directory by default; pass `--path` only when operating on another project.
-`annotation serve` is not bound to a project and does not require `grapha index`;
-sync requests carry the project id used to route records into the right global
-annotation store.
+Annotation records are scoped by project id, not branch, so notes survive normal
+branch switches. The project id comes from `[repo].name`, Git remote/common-dir
+identity, or the project path fallback; set `[repo].name` for stable sync across
+non-Git copies. Existing branch-specific records remain readable and are
+normalized into project-scoped records on write/sync. `sync` resolves the service
+address from `--server`, `GRAPHA_ANNOTATION_SERVER`, project `grapha.toml`, then
+global Grapha config. `list` and `sync` use the current directory by default;
+pass `--path` only when operating on another project. `annotation serve` is not
+bound to a project and does not require `grapha index`; sync requests carry the
+project id used to route records into the right global annotation store.
 
 ### Dataflow
 

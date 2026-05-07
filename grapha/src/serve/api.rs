@@ -345,10 +345,6 @@ pub async fn sync_standalone_annotations(
         .project
         .as_ref()
         .map(|project| project.project_id.as_str());
-    let fallback_branch = payload
-        .project
-        .as_ref()
-        .map(|project| project.branch.as_str());
     let mut grouped: BTreeMap<String, Vec<crate::annotations::SymbolAnnotationRecord>> =
         BTreeMap::new();
 
@@ -360,11 +356,6 @@ pub async fn sync_standalone_annotations(
             };
         if record.project_id.trim().is_empty() {
             record.project_id = project_id.clone();
-        }
-        if record.branch.trim().is_empty()
-            && let Some(branch) = fallback_branch.and_then(non_empty)
-        {
-            record.branch = branch.to_string();
         }
         grouped.entry(project_id).or_default().push(record);
     }
@@ -549,7 +540,7 @@ mod tests {
         let records = store.list_records().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].project_id, "remote-demo");
-        assert_eq!(records[0].branch, "main");
+        assert_eq!(records[0].branch, "");
     }
 
     #[tokio::test]
