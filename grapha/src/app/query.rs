@@ -102,7 +102,13 @@ fn resolve_concept_search_field_set(fields_flag: &Option<String>, path: &Path) -
         None => {
             let cfg = config::load_config(path);
             if cfg.output.default_fields.is_empty() {
-                fields::FieldSet::all().without_file().without_span()
+                let mut field_set = fields::FieldSet::default().without_file().without_span();
+                field_set.id = true;
+                field_set.locator = true;
+                field_set.module = true;
+                field_set.repo = true;
+                field_set.visibility = true;
+                field_set
             } else {
                 fields::FieldSet::from_config(&cfg.output.default_fields)
             }
@@ -1082,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn default_concept_search_fields_hide_file_and_span() {
+    fn default_concept_search_fields_use_concise_symbol_identity() {
         let project = tempfile::tempdir().unwrap();
 
         let fields = resolve_concept_search_field_set(&None, project.path());
@@ -1091,8 +1097,11 @@ mod tests {
         assert!(!fields.span);
         assert!(fields.id);
         assert!(fields.locator);
-        assert!(fields.snippet);
-        assert!(fields.doc_comment);
+        assert!(fields.module);
+        assert!(fields.repo);
+        assert!(fields.visibility);
+        assert!(!fields.snippet);
+        assert!(!fields.doc_comment);
     }
 
     #[test]

@@ -108,7 +108,27 @@ pub struct ProjectedConceptScopeMatch {
     pub symbol: ProjectedConceptSymbol,
     pub score: f32,
     pub status: String,
-    pub evidence: Vec<ConceptEvidence>,
+    pub evidence: Vec<ProjectedConceptEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProjectedConceptEvidence {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_query_term: Option<String>,
+    pub match_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ui_path: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -806,9 +826,101 @@ pub fn project_concept_search_result(
                 symbol: project_concept_symbol(&scope.symbol, fields),
                 score: scope.score,
                 status: scope.status.clone(),
-                evidence: scope.evidence.clone(),
+                evidence: project_concept_evidence(
+                    &scope.evidence,
+                    &result.query,
+                    &scope.symbol.name,
+                    fields == FieldSet::all(),
+                ),
             })
             .collect(),
+    }
+}
+
+fn project_concept_evidence(
+    evidence: &[ConceptEvidence],
+    query: &str,
+    symbol_name: &str,
+    full: bool,
+) -> Vec<ProjectedConceptEvidence> {
+    let mut projected = evidence
+        .iter()
+        .map(|evidence| ProjectedConceptEvidence {
+            kind: evidence.kind.clone(),
+            value: full.then(|| evidence.value.clone()),
+            matched_query_term: (!full && evidence.value.trim() != query.trim())
+                .then(|| evidence.value.clone()),
+            match_kind: evidence.match_kind.clone(),
+            table: evidence.table.clone(),
+            key: evidence.key.clone(),
+            source_value: evidence.source_value.clone(),
+            ui_path: evidence.ui_path.clone(),
+            note: (full || evidence.note.as_deref() != Some(symbol_name))
+                .then(|| evidence.note.clone())
+                .flatten(),
+        })
+        .collect::<Vec<_>>();
+
+    if !full {
+        remove_redundant_snippet_evidence(&mut projected);
+    }
+
+    projected
+}
+
+fn remove_redundant_snippet_evidence(evidence: &mut Vec<ProjectedConceptEvidence>) {
+    let redundant_snippet_indexes = evidence
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            (candidate.kind == "snippet"
+                && evidence.iter().enumerate().any(|(other_index, other)| {
+                    other_index != index
+                        && other.kind != "snippet"
+                        && same_concise_evidence_match(candidate, other)
+                        && source_contains(candidate, other)
+                }))
+            .then_some(index)
+        })
+        .collect::<HashSet<_>>();
+
+    if redundant_snippet_indexes.is_empty() {
+        return;
+    }
+
+    let mut index = 0usize;
+    evidence.retain(|_| {
+        let keep = !redundant_snippet_indexes.contains(&index);
+        index += 1;
+        keep
+    });
+}
+
+fn same_concise_evidence_match(
+    left: &ProjectedConceptEvidence,
+    right: &ProjectedConceptEvidence,
+) -> bool {
+    left.value == right.value
+        && left.matched_query_term == right.matched_query_term
+        && left.match_kind == right.match_kind
+        && left.table == right.table
+        && left.key == right.key
+        && left.ui_path == right.ui_path
+        && left.note == right.note
+}
+
+fn source_contains(
+    container: &ProjectedConceptEvidence,
+    contained: &ProjectedConceptEvidence,
+) -> bool {
+    match (
+        container.source_value.as_deref(),
+        contained.source_value.as_deref(),
+    ) {
+        (Some(container), Some(contained)) => {
+            !contained.is_empty() && container != contained && container.contains(contained)
+        }
+        _ => false,
     }
 }
 
@@ -2673,6 +2785,105 @@ mod tests {
         assert!(symbol.get("span").is_none());
         assert_eq!(symbol["id"], "room-title");
         assert_eq!(symbol["snippet"], "var titleStr: String");
+    }
+
+    fn new_room_projection_result() -> ConceptSearchResult {
+        let symbol = SymbolInfo {
+            id: "room-entrance.newRoom".to_string(),
+            locator: Some("Room::Task.swift::newRoom".to_string()),
+            name: "newRoom".to_string(),
+            kind: NodeKind::Variant,
+            file: "Task.swift".to_string(),
+            span: [42, 42],
+            visibility: Some(Visibility::Public),
+            role: None,
+            signature: None,
+            doc_comment: Some("//新房主任务".to_string()),
+            annotation: None,
+            module: Some("Room".to_string()),
+            snippet: Some("case newRoom = 1  //新房主任务".to_string()),
+            repo: Some("lama-ludo-ios".to_string()),
+        };
+        ConceptSearchResult {
+            query: "新用户房主任务".to_string(),
+            resolved_from: "heuristics".to_string(),
+            matched_concept: None,
+            scopes: vec![ConceptScopeMatch {
+                symbol,
+                score: 575.0,
+                status: STATUS_CANDIDATE.to_string(),
+                evidence: vec![
+                    ConceptEvidence {
+                        kind: "doc_comment".to_string(),
+                        value: "新用户房主任务".to_string(),
+                        match_kind: "fuzzy".to_string(),
+                        table: None,
+                        key: None,
+                        source_value: Some("//新房主任务".to_string()),
+                        ui_path: Vec::new(),
+                        note: Some("newRoom".to_string()),
+                    },
+                    ConceptEvidence {
+                        kind: "snippet".to_string(),
+                        value: "新用户房主任务".to_string(),
+                        match_kind: "fuzzy".to_string(),
+                        table: None,
+                        key: None,
+                        source_value: Some("case newRoom = 1  //新房主任务".to_string()),
+                        ui_path: Vec::new(),
+                        note: Some("newRoom".to_string()),
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn project_concept_search_result_uses_concise_evidence_when_not_full() {
+        let result = new_room_projection_result();
+        let mut fields = FieldSet::none();
+        fields.id = true;
+        fields.locator = true;
+        fields.module = true;
+        fields.repo = true;
+        fields.visibility = true;
+
+        let projected = project_concept_search_result(&result, fields);
+        let payload = serde_json::to_value(&projected).unwrap();
+        let symbol = &payload["scopes"][0]["symbol"];
+        let evidence = payload["scopes"][0]["evidence"].as_array().unwrap();
+
+        assert!(symbol.get("doc_comment").is_none());
+        assert!(symbol.get("snippet").is_none());
+        assert_eq!(symbol["id"], "room-entrance.newRoom");
+        assert_eq!(symbol["locator"], "Room::Task.swift::newRoom");
+        assert_eq!(symbol["module"], "Room");
+        assert_eq!(symbol["repo"], "lama-ludo-ios");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0]["kind"], "doc_comment");
+        assert_eq!(evidence[0]["match_kind"], "fuzzy");
+        assert_eq!(evidence[0]["source_value"], "//新房主任务");
+        assert!(evidence[0].get("value").is_none());
+        assert!(evidence[0].get("matched_query_term").is_none());
+        assert!(evidence[0].get("note").is_none());
+    }
+
+    #[test]
+    fn project_concept_search_result_keeps_full_evidence_for_full_fields() {
+        let result = new_room_projection_result();
+
+        let projected = project_concept_search_result(&result, FieldSet::all());
+        let payload = serde_json::to_value(&projected).unwrap();
+        let symbol = &payload["scopes"][0]["symbol"];
+        let evidence = payload["scopes"][0]["evidence"].as_array().unwrap();
+
+        assert_eq!(symbol["doc_comment"], "//新房主任务");
+        assert_eq!(symbol["snippet"], "case newRoom = 1  //新房主任务");
+        assert_eq!(evidence.len(), 2);
+        assert_eq!(evidence[0]["value"], "新用户房主任务");
+        assert!(evidence[0].get("matched_query_term").is_none());
+        assert_eq!(evidence[0]["note"], "newRoom");
+        assert_eq!(evidence[1]["kind"], "snippet");
     }
 
     #[test]

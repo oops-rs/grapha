@@ -224,9 +224,8 @@ impl<'a> LineIndex<'a> {
         let kind_match = usize::from(match kind {
             NodeKind::Function => {
                 trimmed.contains("func ")
-                    || trimmed.contains("init(")
+                    || contains_init_declaration(trimmed)
                     || trimmed.contains("subscript")
-                    || trimmed.contains("var ")
             }
             NodeKind::Class => trimmed.contains("class "),
             NodeKind::Property | NodeKind::Field | NodeKind::Constant => {
@@ -472,10 +471,7 @@ fn declaration_matches_symbol(line: &str, symbol: &str, kind: NodeKind) -> bool 
 
     match kind {
         NodeKind::Function => {
-            line.contains("func ")
-                || line.contains("init(")
-                || line.contains("subscript")
-                || line.contains("var ")
+            line.contains("func ") || contains_init_declaration(line) || line.contains("subscript")
         }
         NodeKind::Class => line.contains("class "),
         NodeKind::Property | NodeKind::Field | NodeKind::Constant => {
@@ -489,6 +485,22 @@ fn declaration_matches_symbol(line: &str, symbol: &str, kind: NodeKind) -> bool 
         NodeKind::Extension => line.contains("extension "),
         _ => true,
     }
+}
+
+fn contains_init_declaration(line: &str) -> bool {
+    let mut rest = line;
+    let mut base = 0usize;
+    while let Some(offset) = rest.find("init(") {
+        let index = base + offset;
+        let prev = line[..index].chars().next_back();
+        if !prev.is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.')) {
+            return true;
+        }
+        let next_start = offset + "init(".len();
+        rest = &rest[next_start..];
+        base = index + "init(".len();
+    }
+    false
 }
 
 #[cfg(test)]
@@ -608,6 +620,21 @@ mod tests {
         assert_eq!(
             index.extract_symbol_snippet(&span, "getter:currencyValue", NodeKind::Function),
             Some("var currencyValue: Int64 = 0  //待领取的金币数值".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_symbol_snippet_does_not_treat_property_initializer_as_init() {
+        let source = "struct NewStreamerTaskView {\n    @State private var viewModel: TaskEntranceViewModel = .init()\n    // 找到“新房主任务”下第一个没领奖/没完成的任务\n    private var taskItem: RoomTaskItem? {\n        guard viewModel.activityType == .newUser else { return nil }\n        return viewModel.myRoomTask?.dailyTaskItems\n            .first { task in\n                task.taskStatus != .completedRewarded\n            }\n    }\n}\n";
+        let index = LineIndex::new(source);
+        let span = Span {
+            start: [1, 4],
+            end: [1, 4],
+        };
+
+        assert_eq!(
+            index.extract_symbol_snippet(&span, "init()", NodeKind::Function),
+            None
         );
     }
 
