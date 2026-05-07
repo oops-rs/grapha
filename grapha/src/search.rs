@@ -8,12 +8,15 @@ use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::{IndexRecordOption, STORED, STRING, Schema, TEXT, Value};
 use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 
-use crate::annotations::{AnnotationIndex, SymbolAnnotationView};
+use crate::annotations::AnnotationIndex;
 use crate::delta::{EntitySyncStats, GraphDelta, SyncMode};
 use crate::fields::FieldSet;
+use crate::snippet::trim_snippet_indentation;
 use crate::symbol_locator::SymbolLocatorIndex;
 use grapha_core::graph::{EdgeKind, Graph};
 use grapha_core::graph::{Node, NodeRole};
+
+const MAX_SEARCH_SNIPPET_CHARS: usize = 600;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
@@ -760,7 +763,7 @@ pub struct SearchOutputResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_comment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub annotation: Option<SymbolAnnotationView>,
+    pub annotation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -798,6 +801,26 @@ fn node_span_string(node: &Node) -> String {
         "{}:{}-{}:{}",
         node.span.start[0], node.span.start[1], node.span.end[0], node.span.end[1]
     )
+}
+
+fn compact_search_snippet(snippet: &str) -> String {
+    let deindented = trim_snippet_indentation(snippet);
+    let compact = deindented
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if compact.len() <= MAX_SEARCH_SNIPPET_CHARS {
+        return compact;
+    }
+
+    let mut truncate_at = MAX_SEARCH_SNIPPET_CHARS;
+    while !compact.is_char_boundary(truncate_at) {
+        truncate_at -= 1;
+    }
+    format!("{} ...", compact[..truncate_at].trim_end())
 }
 
 fn collect_graph_details<'a>(
@@ -894,7 +917,9 @@ pub fn project_results(
                     None
                 },
                 snippet: if fields.snippet {
-                    details.and_then(|details| details.node.snippet.clone())
+                    details
+                        .and_then(|details| details.node.snippet.as_deref())
+                        .map(compact_search_snippet)
                 } else {
                     None
                 },
@@ -915,7 +940,9 @@ pub fn project_results(
                 },
                 annotation: if fields.annotation {
                     details.and_then(|details| {
-                        annotations.and_then(|annotations| annotations.get_for_node(details.node))
+                        annotations
+                            .and_then(|annotations| annotations.get_for_node(details.node))
+                            .map(|annotation| annotation.text)
                     })
                 } else {
                     None
@@ -1793,7 +1820,7 @@ mod tests {
                     signature: Some("fn main()".into()),
                     doc_comment: Some("Starts the application".into()),
                     module: Some("App".into()),
-                    snippet: Some("fn main() { helper(); }".into()),
+                    snippet: Some("\n    fn main() {\n        helper();\n    }\n\n\n".into()),
                     repo: None,
                 },
                 Node {
@@ -1864,5 +1891,21 @@ mod tests {
         assert!(result.file.is_none());
         assert_eq!(result.calls, vec!["app::helper".to_string()]);
         assert!(result.called_by.is_empty());
+    }
+
+    #[test]
+    fn compact_search_snippet_trims_flattens_and_truncates() {
+        let snippet = format!(
+            "\n    func load() {{\n        {}\n    }}\n",
+            "work(); ".repeat(120)
+        );
+
+        let compact = compact_search_snippet(&snippet);
+
+        assert!(!compact.chars().next().is_some_and(char::is_whitespace));
+        assert!(!compact.contains('\n'));
+        assert!(compact.starts_with("func load() { work();"));
+        assert!(compact.ends_with("..."));
+        assert!(compact.len() <= MAX_SEARCH_SNIPPET_CHARS + 4);
     }
 }

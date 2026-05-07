@@ -281,7 +281,7 @@ fn symbol_annotations_round_trip_through_cli_context_and_concept_search() {
         .iter()
         .find(|result| result["name"] == "CheckoutCoordinator")
         .expect("search should return CheckoutCoordinator");
-    assert_eq!(search_result["annotation"]["text"], annotation_text);
+    assert_eq!(search_result["annotation"], annotation_text);
     assert!(
         search_result.get("score").is_none(),
         "symbol search should not serialize ranking scores by default: {parsed:#?}"
@@ -315,7 +315,7 @@ fn symbol_annotations_round_trip_through_cli_context_and_concept_search() {
         "symbol search should serialize scores when the score field is requested: {parsed:#?}"
     );
     assert_eq!(
-        scored_search_result["annotation"]["text"], annotation_text,
+        scored_search_result["annotation"], annotation_text,
         "explicit fields still allow annotations when requested"
     );
 
