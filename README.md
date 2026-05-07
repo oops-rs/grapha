@@ -163,13 +163,17 @@ grapha symbol file <path>                  # list declarations in a file
 
 ```bash
 grapha annotation serve -p . --port 8080               # LAN HTTP service with annotation APIs
-grapha annotation list -p .                            # local annotation records + project identity
-grapha annotation sync --server http://HOST:8080 -p .  # pull, merge, and push annotations
+grapha annotation list                                 # local annotation records + project identity
+grapha annotation sync                                 # sync with configured annotation service
+grapha annotation sync --server http://HOST:8080       # explicit one-off service override
 ```
 
 Annotation records carry a project id plus branch. The project id comes from
 `[repo].name`, Git remote/common-dir identity, or the project path fallback;
-set `[repo].name` for stable sync across non-Git copies.
+set `[repo].name` for stable sync across non-Git copies. `sync` resolves the
+service address from `--server`, `GRAPHA_ANNOTATION_SERVER`, then
+`[annotations].server`. `list` and `sync` use the current directory by default;
+pass `--path` only when operating on another project.
 
 ### Dataflow
 
@@ -231,6 +235,9 @@ Optional `grapha.toml` at project root:
 ```toml
 [repo]
 name = "MobileApp"                         # defaults to the project directory name
+
+[annotations]
+server = "http://192.168.1.10:8080"        # default for `grapha annotation sync`
 
 [swift]
 index_store = true                         # false → tree-sitter only

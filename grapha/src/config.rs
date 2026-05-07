@@ -66,6 +66,12 @@ pub struct InferredConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+pub struct AnnotationConfig {
+    #[serde(default)]
+    pub server: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct GraphaConfig {
     #[serde(default)]
     pub repo: RepoConfig,
@@ -77,6 +83,8 @@ pub struct GraphaConfig {
     pub architecture: ArchitectureConfig,
     #[serde(default)]
     pub inferred: InferredConfig,
+    #[serde(default)]
+    pub annotations: AnnotationConfig,
     #[serde(default)]
     pub classifiers: Vec<ClassifierRule>,
     #[serde(default)]
@@ -267,6 +275,19 @@ name = "MobileApp"
 "#;
         let config: GraphaConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.repo.name.as_deref(), Some("MobileApp"));
+    }
+
+    #[test]
+    fn parse_annotation_server() {
+        let toml_str = r#"
+[annotations]
+server = "http://192.168.1.10:8080"
+"#;
+        let config: GraphaConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.annotations.server.as_deref(),
+            Some("http://192.168.1.10:8080")
+        );
     }
 
     #[test]

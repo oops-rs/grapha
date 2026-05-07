@@ -34,8 +34,11 @@ Use grapha's code intelligence to navigate, understand, and assess codebases bef
 - Record an annotation when you discover reusable symbol knowledge that would be expensive to re-derive later, such as ownership, business role, invariants, cross-module coupling, or migration context. This can reduce future token usage by letting agents retrieve a compact note instead of rereading surrounding files.
 - Keep annotations concise and factual. Do not annotate transient guesses, obvious names, or task-local scratch notes.
 - `grapha annotation serve -p . --port 8080` — deploy the local HTTP annotation service; the Grapha HTTP server binds for LAN access
-- `grapha annotation list -p .` — inspect local annotation records and their project/branch identity
-- `grapha annotation sync --server http://HOST:8080 -p .` — pull, merge, and push annotations against a remote Grapha annotation service
+- `grapha annotation list` — inspect local annotation records and their project/branch identity
+- `grapha annotation sync` — pull, merge, and push annotations against the configured Grapha annotation service
+- `grapha annotation sync --server http://HOST:8080` — override the configured service for one sync
+- `grapha annotation sync` resolves the service address from `--server`, then `GRAPHA_ANNOTATION_SERVER`, then `[annotations].server` in `grapha.toml`.
+- `list` and `sync` use the current directory by default; pass `--path` only when operating on another project.
 - Annotation records are scoped by project id and branch, while retaining fallback behavior for legacy/shared records. Set `[repo].name` in `grapha.toml` when syncing non-Git copies that should share one project identity.
 
 ## Dataflow tracing
@@ -54,4 +57,4 @@ Use grapha's code intelligence to navigate, understand, and assess codebases bef
 - Use `file.swift::symbol` to disambiguate when multiple symbols share a name
 - After significant code changes, run `grapha index .` to keep the graph fresh and refresh stored snippets
 - After resolving a non-obvious symbol's role or invariant, consider `grapha symbol annotate <symbol> "<compact note>" --by <agent>` so future agents can spend fewer tokens reloading context
-- Before relying on shared annotation knowledge from another machine, run `grapha annotation sync --server http://HOST:8080 -p .`
+- Before relying on shared annotation knowledge from another machine, run `grapha annotation sync` after configuring `[annotations].server` or `GRAPHA_ANNOTATION_SERVER`.

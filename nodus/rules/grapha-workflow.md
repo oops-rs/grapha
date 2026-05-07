@@ -12,5 +12,6 @@
 - Use `grapha symbol annotate` for durable, reusable symbol notes that should survive future sessions and reduce repeated context loading
 - Prefer annotations for expensive-to-rediscover facts: ownership, business role, invariants, dataflow meaning, migration notes, or cross-module coupling
 - Do not annotate guesses, obvious symbol names, or temporary task-local scratch context
-- Use `grapha annotation serve`, `grapha annotation list`, and `grapha annotation sync --server http://HOST:8080` when sharing annotation knowledge across local machines
+- Use `grapha annotation serve`, `grapha annotation list`, and `grapha annotation sync` when sharing annotation knowledge across local machines
+- Configure annotation sync with `[annotations].server` in `grapha.toml`, `GRAPHA_ANNOTATION_SERVER`, or an explicit `--server` override
 - Prefer setting `[repo].name` in `grapha.toml` before syncing non-Git project copies that should share the same annotation identity

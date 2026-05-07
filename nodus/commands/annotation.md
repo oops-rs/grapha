@@ -5,9 +5,13 @@ Use Grapha's annotation commands based on the requested action:
 
 - To add or replace a symbol note: `grapha symbol annotate "<symbol>" "<annotation>" --by codex`
 - To inspect one symbol note: `grapha symbol annotation "<symbol>"`
-- To list local annotation records and project/branch identity: `grapha annotation list -p .`
+- To list local annotation records and project/branch identity: `grapha annotation list`
 - To deploy the local LAN annotation service: `grapha annotation serve -p . --port 8080`
-- To sync with another local Grapha annotation service: `grapha annotation sync --server http://HOST:8080 -p .`
+- To sync with another local Grapha annotation service: `grapha annotation sync`
+- To override the configured service for one sync: `grapha annotation sync --server http://HOST:8080`
+
+`grapha annotation sync` resolves the service address from `--server`, then `GRAPHA_ANNOTATION_SERVER`, then `[annotations].server` in `grapha.toml`.
+`grapha annotation list` and `grapha annotation sync` use the current directory by default; pass `--path` only when operating on another project.
 
 Record an annotation when the note is compact, factual, and likely to save future agents from rereading files: ownership, business meaning, invariants, migration context, or non-obvious dependencies are good candidates. Avoid recording guesses, obvious restatements of the symbol name, or temporary task scratch.
 
