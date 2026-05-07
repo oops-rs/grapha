@@ -55,6 +55,11 @@ impl FieldSet {
         self
     }
 
+    pub fn without_file(mut self) -> Self {
+        self.file = false;
+        self
+    }
+
     pub fn all() -> Self {
         Self {
             score: true,

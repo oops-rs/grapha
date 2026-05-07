@@ -80,10 +80,15 @@ fn resolve_field_set(fields_flag: &Option<String>, path: &Path) -> fields::Field
 fn resolve_search_field_set(fields_flag: &Option<String>, path: &Path) -> fields::FieldSet {
     match fields_flag {
         Some(_) => resolve_field_set(fields_flag, path),
-        None => resolve_field_set(fields_flag, path)
-            .with_id()
-            .with_locator()
-            .with_annotation(),
+        None => {
+            let cfg = config::load_config(path);
+            let field_set = if cfg.output.default_fields.is_empty() {
+                fields::FieldSet::default().without_file()
+            } else {
+                fields::FieldSet::from_config(&cfg.output.default_fields)
+            };
+            field_set.with_id().with_locator().with_annotation()
+        }
     }
 }
 

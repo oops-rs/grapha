@@ -22,6 +22,14 @@ pub fn discover_files(path: &Path, registry: &LanguageRegistry) -> anyhow::Resul
 
 pub fn relative_path_for_input(input_path: &Path, file: &Path) -> PathBuf {
     if input_path.is_dir() {
+        if let (Ok(root), Ok(file)) = (
+            std::fs::canonicalize(input_path),
+            std::fs::canonicalize(file),
+        ) && let Ok(relative) = file.strip_prefix(&root)
+        {
+            return relative.to_path_buf();
+        }
+
         file.strip_prefix(input_path).unwrap_or(file).to_path_buf()
     } else {
         file.file_name()
@@ -245,6 +253,20 @@ mod tests {
 
         let result = extract_with_registry(&registry, b"fn main() {}", &file_context).unwrap();
         assert_eq!(result.nodes[0].module.as_deref(), Some("core"));
+    }
+
+    #[test]
+    fn relative_path_for_input_uses_project_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let file = src_dir.join("main.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        assert_eq!(
+            relative_path_for_input(dir.path(), &file),
+            PathBuf::from("src/main.rs")
+        );
     }
 
     #[test]

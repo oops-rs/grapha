@@ -1197,6 +1197,14 @@ fn symbol_search_includes_id_by_default() {
         first.get("id").is_some(),
         "default search output should include id"
     );
+    assert!(
+        first.get("locator").is_some(),
+        "default search output should include locator"
+    );
+    assert!(
+        first.get("file").is_none(),
+        "default search output should omit file because locator already identifies the symbol"
+    );
 }
 
 #[test]
@@ -2148,6 +2156,52 @@ fn search_fields_projection_works() {
     assert_eq!(first["signature"], "fn main()");
     assert_eq!(first["role"], "entry_point");
     assert!(first.get("file").is_none());
+}
+
+#[test]
+fn search_file_field_uses_project_relative_path_when_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("main.rs"), "fn main() {}\n").unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = grapha()
+        .args([
+            "symbol",
+            "search",
+            "main",
+            "-p",
+            dir.path().to_str().unwrap(),
+            "--fields",
+            "file,locator",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    let first = &parsed[0];
+    assert_eq!(first["name"], "main");
+    assert_eq!(first["file"], "src/main.rs");
+    assert!(
+        first["locator"]
+            .as_str()
+            .is_some_and(|locator| locator.ends_with("main.rs::main")),
+        "locator should still carry the symbol path: {parsed:#?}"
+    );
 }
 
 #[test]
