@@ -126,15 +126,21 @@ fn run_requested_snapshots(
     })
 }
 
-fn print_snapshot_progress(localization: TimedLocalizationSnapshot, assets: TimedAssetSnapshot) {
+fn print_snapshot_progress(
+    localization: TimedLocalizationSnapshot,
+    assets: TimedAssetSnapshot,
+    verbose: bool,
+) {
     if let Some((localize_elapsed, localize_stats)) = localization {
-        progress::done_elapsed(
-            &format!(
-                "saved localization snapshot ({} records)",
-                localize_stats.record_count
-            ),
-            localize_elapsed,
-        );
+        if verbose {
+            progress::done_elapsed(
+                &format!(
+                    "saved localization snapshot ({} records)",
+                    localize_stats.record_count
+                ),
+                localize_elapsed,
+            );
+        }
         for warning in &localize_stats.warnings {
             eprintln!(
                 "  \x1b[33m!\x1b[0m skipped invalid localization catalog {}: {}",
@@ -144,13 +150,15 @@ fn print_snapshot_progress(localization: TimedLocalizationSnapshot, assets: Time
     }
 
     if let Some((assets_elapsed, assets_stats)) = assets {
-        progress::done_elapsed(
-            &format!(
-                "saved asset snapshot ({} images)",
-                assets_stats.record_count
-            ),
-            assets_elapsed,
-        );
+        if verbose {
+            progress::done_elapsed(
+                &format!(
+                    "saved asset snapshot ({} images)",
+                    assets_stats.record_count
+                ),
+                assets_elapsed,
+            );
+        }
         for warning in &assets_stats.warnings {
             eprintln!(
                 "  \x1b[33m!\x1b[0m skipped invalid asset catalog {}: {}",
@@ -160,13 +168,15 @@ fn print_snapshot_progress(localization: TimedLocalizationSnapshot, assets: Time
     }
 }
 
-fn print_index_summary(node_count: usize, edge_count: usize, total_start: Instant) {
-    progress::summary(&format!(
-        "\n  {} nodes, {} edges indexed in {:.1}s",
-        node_count,
-        edge_count,
-        total_start.elapsed().as_secs_f64(),
-    ));
+fn print_index_summary(node_count: usize, edge_count: usize, total_start: Instant, verbose: bool) {
+    if verbose {
+        progress::summary(&format!(
+            "\n  {} nodes, {} edges indexed in {:.1}s",
+            node_count,
+            edge_count,
+            total_start.elapsed().as_secs_f64(),
+        ));
+    }
 }
 
 fn load_existing_graph(
@@ -190,13 +200,15 @@ fn load_existing_graph(
     }
 }
 
-pub(crate) fn open_search_index(path: &Path) -> anyhow::Result<tantivy::Index> {
+pub(crate) fn open_search_index(path: &Path, verbose: bool) -> anyhow::Result<tantivy::Index> {
     let search_index_path = path.join(".grapha/search_index");
     if search_index_path.exists() {
         Ok(tantivy::Index::open_in_dir(&search_index_path)?)
     } else {
         let graph = load_graph(path)?;
-        eprintln!("  building search index...");
+        if verbose {
+            eprintln!("  building search index...");
+        }
         Ok(search::build_index(&graph, &search_index_path)?)
     }
 }
@@ -207,8 +219,10 @@ pub(crate) fn handle_index(
     store_dir: Option<PathBuf>,
     full_rebuild: bool,
     timing: bool,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     let total_start = Instant::now();
+    let show_progress = verbose || timing;
     let store_path = store_dir.unwrap_or_else(|| path.join(".grapha"));
     let config = crate::config::load_config(&path);
     let mut work_plan = None;
@@ -223,11 +237,18 @@ pub(crate) fn handle_index(
                     plan.status.edge_count,
                     &config,
                 )?;
-                progress::done_elapsed(
-                    "index is up to date, skipping rebuild",
-                    total_start.elapsed(),
+                if show_progress {
+                    progress::done_elapsed(
+                        "index is up to date, skipping rebuild",
+                        total_start.elapsed(),
+                    );
+                }
+                print_index_summary(
+                    plan.status.node_count,
+                    plan.status.edge_count,
+                    total_start,
+                    show_progress,
                 );
-                print_index_summary(plan.status.node_count, plan.status.edge_count, total_start);
                 return Ok(());
             }
             Ok(Some(plan)) => {
@@ -274,15 +295,22 @@ pub(crate) fn handle_index(
             &config,
         )?;
 
-        eprintln!("  \x1b[32m✓\x1b[0m graph is up to date, skipping graph and search rebuild");
-        print_snapshot_progress(snapshot_result.0, snapshot_result.1);
-        print_index_summary(plan.status.node_count, plan.status.edge_count, total_start);
+        if show_progress {
+            eprintln!("  \x1b[32m✓\x1b[0m graph is up to date, skipping graph and search rebuild");
+        }
+        print_snapshot_progress(snapshot_result.0, snapshot_result.1, show_progress);
+        print_index_summary(
+            plan.status.node_count,
+            plan.status.edge_count,
+            total_start,
+            show_progress,
+        );
         return Ok(());
     }
 
     let pipeline = crate::app::pipeline::run_pipeline(
         &path,
-        true,
+        verbose,
         timing,
         previous_extraction_cache.as_ref(),
     )?;
@@ -337,9 +365,18 @@ pub(crate) fn handle_index(
             &config,
         )?;
 
-        eprintln!("  \x1b[32m✓\x1b[0m no graph changes detected, skipping store and search sync");
-        print_snapshot_progress(snapshot_result.0, snapshot_result.1);
-        print_index_summary(graph.nodes.len(), graph.edges.len(), total_start);
+        if show_progress {
+            eprintln!(
+                "  \x1b[32m✓\x1b[0m no graph changes detected, skipping store and search sync"
+            );
+        }
+        print_snapshot_progress(snapshot_result.0, snapshot_result.1, show_progress);
+        print_index_summary(
+            graph.nodes.len(),
+            graph.edges.len(),
+            total_start,
+            show_progress,
+        );
 
         return Ok(());
     }
@@ -423,21 +460,28 @@ pub(crate) fn handle_index(
         &config,
     )?;
 
-    progress::done_elapsed(
-        &format!(
-            "saved to {} ({}; {})",
-            store_path.display(),
-            format,
-            save_stats.summary()
-        ),
-        save_elapsed,
+    if show_progress {
+        progress::done_elapsed(
+            &format!(
+                "saved to {} ({}; {})",
+                store_path.display(),
+                format,
+                save_stats.summary()
+            ),
+            save_elapsed,
+        );
+        progress::done_elapsed(
+            &format!("built search index ({})", search_stats.summary()),
+            search_elapsed,
+        );
+    }
+    print_snapshot_progress(localization_result, assets_result, show_progress);
+    print_index_summary(
+        graph.nodes.len(),
+        graph.edges.len(),
+        total_start,
+        show_progress,
     );
-    progress::done_elapsed(
-        &format!("built search index ({})", search_stats.summary()),
-        search_elapsed,
-    );
-    print_snapshot_progress(localization_result, assets_result);
-    print_index_summary(graph.nodes.len(), graph.edges.len(), total_start);
 
     Ok(())
 }

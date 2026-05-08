@@ -60,6 +60,7 @@ fn run_mcp_server_with_optional_watch(
     graph: grapha_core::graph::Graph,
     search_index: tantivy::Index,
     watch_mode: bool,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     let state = mcp::handler::McpState {
         graph,
@@ -84,10 +85,12 @@ fn run_mcp_server_with_optional_watch(
                 for event in rx {
                     match event {
                         watch::WatchEvent::FilesChanged(files) => {
-                            eprintln!("watch: {} file(s) changed, re-indexing...", files.len());
+                            if verbose {
+                                eprintln!("watch: {} file(s) changed, re-indexing...", files.len());
+                            }
                             match crate::app::pipeline::run_pipeline(
                                 &project_path,
-                                false,
+                                verbose,
                                 false,
                                 None,
                             ) {
@@ -117,7 +120,9 @@ fn run_mcp_server_with_optional_watch(
                                             if state_tx.send((graph, index)).is_err() {
                                                 break;
                                             }
-                                            eprintln!("watch: re-index complete");
+                                            if verbose {
+                                                eprintln!("watch: re-index complete");
+                                            }
                                         }
                                         Err(e) => {
                                             eprintln!("watch: failed to build search index: {e}");
@@ -133,7 +138,7 @@ fn run_mcp_server_with_optional_watch(
                 }
             })?;
 
-        mcp::run_mcp_server_with_watch(state, state_rx)?;
+        mcp::run_mcp_server_with_watch(state, state_rx, verbose)?;
         return Ok(());
     } else {
         None::<watch::WatcherGuard>
@@ -148,13 +153,14 @@ pub(crate) fn handle_serve(
     port: Option<u16>,
     mcp_mode: bool,
     watch_mode: Option<bool>,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     let options = resolve_serve_options(&path, host, port, watch_mode);
     let graph = load_graph(&path)?;
-    let search_index = open_search_index(&path)?;
+    let search_index = open_search_index(&path, verbose)?;
 
     if mcp_mode {
-        run_mcp_server_with_optional_watch(path, graph, search_index, options.watch)
+        run_mcp_server_with_optional_watch(path, graph, search_index, options.watch, verbose)
     } else {
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(serve::run(

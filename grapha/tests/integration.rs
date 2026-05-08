@@ -117,7 +117,8 @@ fn output_to_file() {
             output.to_str().unwrap(),
         ])
         .assert()
-        .success();
+        .success()
+        .stderr(predicate::str::is_empty());
 
     let content = std::fs::read_to_string(&output).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -768,10 +769,62 @@ fn index_creates_sqlite_db() {
         ])
         .assert()
         .success()
-        .stderr(predicate::str::contains("indexed"));
+        .stderr(predicate::str::is_empty());
 
     assert!(store_dir.join("grapha.db").exists());
     assert!(store_dir.join("localization.json").exists());
+}
+
+#[test]
+fn verbose_index_reports_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+
+    grapha()
+        .args([
+            "--verbose",
+            "index",
+            "tests/fixtures/simple.rs",
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("indexed"));
+
+    assert!(store_dir.join("grapha.db").exists());
+}
+
+#[test]
+fn symbol_search_hides_timing_until_verbose() {
+    let dir = index_temp_rust_project("pub fn quiet_target() {}\n");
+
+    grapha()
+        .args([
+            "symbol",
+            "search",
+            "quiet_target",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"name\": \"quiet_target\""))
+        .stderr(predicate::str::contains("results in").not());
+
+    grapha()
+        .args([
+            "--verbose",
+            "symbol",
+            "search",
+            "quiet_target",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"name\": \"quiet_target\""))
+        .stderr(predicate::str::contains("results in"));
 }
 
 #[test]
@@ -818,6 +871,7 @@ fn index_reuses_cached_extractions_when_sources_are_unchanged() {
 
     grapha()
         .args([
+            "--verbose",
             "index",
             dir.path().to_str().unwrap(),
             "--store-dir",
@@ -2270,6 +2324,7 @@ fn repeated_index_uses_incremental_store_and_search() {
 
     grapha()
         .args([
+            "--verbose",
             "index",
             dir.path().to_str().unwrap(),
             "--store-dir",
@@ -2287,6 +2342,7 @@ fn repeated_index_uses_incremental_store_and_search() {
 
     grapha()
         .args([
+            "--verbose",
             "index",
             dir.path().to_str().unwrap(),
             "--store-dir",

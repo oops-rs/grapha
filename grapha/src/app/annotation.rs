@@ -44,7 +44,10 @@ fn resolve_sync_server_from(
         })
 }
 
-pub(crate) fn handle_annotation_command(command: AnnotationCommands) -> anyhow::Result<()> {
+pub(crate) fn handle_annotation_command(
+    command: AnnotationCommands,
+    verbose: bool,
+) -> anyhow::Result<()> {
     match command {
         AnnotationCommands::Serve {
             path: _,
@@ -63,7 +66,7 @@ pub(crate) fn handle_annotation_command(command: AnnotationCommands) -> anyhow::
             let rt = tokio::runtime::Runtime::new()?;
             let mirror_stderr = std::env::var(DAEMON_LOG_STDERR_ENV)
                 .map(|value| value != "0")
-                .unwrap_or(true);
+                .unwrap_or(verbose);
             rt.block_on(crate::serve::run_annotation_service(
                 port,
                 log_file,

@@ -244,6 +244,7 @@ where
 pub(crate) fn handle_symbol_command(
     command: SymbolCommands,
     render_options: render::RenderOptions,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     match command {
         SymbolCommands::Search {
@@ -268,7 +269,7 @@ pub(crate) fn handle_symbol_command(
                 options.candidate_limit = options.candidate_limit.max(limit);
             }
             let field_set = resolve_search_field_set(&fields, &path);
-            let index = open_search_index(&path)?;
+            let index = open_search_index(&path, verbose)?;
             let options = search::SearchOptions {
                 kind,
                 module,
@@ -321,7 +322,7 @@ pub(crate) fn handle_symbol_command(
                 print_json(&clustered)?;
             } else {
                 print_json(&projected)?;
-                if results.len() == limit && limit > 0 {
+                if verbose && results.len() == limit && limit > 0 {
                     eprintln!("  hint: more score bands may be available with --cluster");
                 }
             }
@@ -338,11 +339,13 @@ pub(crate) fn handle_symbol_command(
                 eprintln!("  \x1b[33m!\x1b[0m results may be stale ({reason})");
             }
 
-            eprintln!(
-                "\n  {} results in {:.1}ms",
-                results.len(),
-                elapsed.as_secs_f64() * 1000.0,
-            );
+            if verbose {
+                eprintln!(
+                    "\n  {} results in {:.1}ms",
+                    results.len(),
+                    elapsed.as_secs_f64() * 1000.0,
+                );
+            }
             Ok(())
         }
         SymbolCommands::Context {
@@ -912,6 +915,7 @@ pub(crate) fn handle_asset_command(
 pub(crate) fn handle_concept_command(
     command: ConceptCommands,
     render_options: render::RenderOptions,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     match command {
         ConceptCommands::Search {
@@ -930,7 +934,7 @@ pub(crate) fn handle_concept_command(
             let field_set = resolve_concept_search_field_set(&fields, &path);
             let render_options = render_options.with_fields(field_set);
             let graph = load_graph(&path)?;
-            let search_index = open_search_index(&path)?;
+            let search_index = open_search_index(&path, verbose)?;
             let concept_index = concepts::load_concept_index(&path)?;
             let catalogs = localization::load_catalog_index(&path).unwrap_or_default();
             let assets_index = assets::load_asset_index(&path).unwrap_or_default();

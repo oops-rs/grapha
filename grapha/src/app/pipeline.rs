@@ -502,8 +502,8 @@ pub(crate) fn handle_analyze(
     output: Option<PathBuf>,
     filter: Option<String>,
     compact: bool,
+    verbose: bool,
 ) -> anyhow::Result<()> {
-    let verbose = output.is_some();
     let mut graph = run_pipeline(&path, verbose, false, None)?.graph;
 
     if let Some(ref filter_str) = filter {
@@ -529,7 +529,9 @@ pub(crate) fn handle_analyze(
         Some(p) => {
             std::fs::write(&p, &json)
                 .with_context(|| format!("failed to write {}", p.display()))?;
-            eprintln!("  \x1b[32m✓\x1b[0m wrote {}", p.display());
+            if verbose {
+                eprintln!("  \x1b[32m✓\x1b[0m wrote {}", p.display());
+            }
         }
         None => println!("{json}"),
     }

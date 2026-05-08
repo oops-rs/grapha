@@ -12,6 +12,7 @@ use types::{JsonRpcRequest, JsonRpcResponse};
 pub fn run_mcp_server_with_watch(
     mut state: McpState,
     watch_rx: std::sync::mpsc::Receiver<(grapha_core::graph::Graph, tantivy::Index)>,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -29,7 +30,9 @@ pub fn run_mcp_server_with_watch(
                 state.graph.nodes.iter().map(|n| n.id.as_str()).collect();
             state.recall.prune(&valid_ids);
 
-            eprintln!("watch: graph updated ({node_count} nodes, {edge_count} edges)");
+            if verbose {
+                eprintln!("watch: graph updated ({node_count} nodes, {edge_count} edges)");
+            }
         }
 
         let line = match line {

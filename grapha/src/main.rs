@@ -47,6 +47,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
     after_help = "Typical workflow:\n  grapha index .\n  grapha repo status\n  grapha symbol search ViewModel --context\n  grapha symbol impact GiftPanelViewModel --format tree\n  grapha serve --mcp --watch\n\nUse `grapha <command> --help` for task-specific examples."
 )]
 struct Cli {
+    /// Show progress, timing, and other diagnostic logs
+    #[arg(long, global = true)]
+    verbose: bool,
     /// ANSI color mode for tree output
     #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
     color: ColorMode,
@@ -895,6 +898,7 @@ enum HistoryCommands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let render_options = app::query::tree_render_options(cli.color);
+    let verbose = cli.verbose;
 
     match cli.command {
         Commands::Analyze {
@@ -902,14 +906,14 @@ fn main() -> anyhow::Result<()> {
             output,
             filter,
             compact,
-        } => app::pipeline::handle_analyze(path, output, filter, compact)?,
+        } => app::pipeline::handle_analyze(path, output, filter, compact, verbose)?,
         Commands::Index {
             path,
             format,
             store_dir,
             full_rebuild,
             timing,
-        } => app::index::handle_index(path, format, store_dir, full_rebuild, timing)?,
+        } => app::index::handle_index(path, format, store_dir, full_rebuild, timing, verbose)?,
         Commands::Migrate { path, from, force } => app::migrate::handle_migrate(path, from, force)?,
         Commands::Serve {
             path,
@@ -917,14 +921,18 @@ fn main() -> anyhow::Result<()> {
             port,
             mcp,
             watch,
-        } => app::serve::handle_serve(path, host, port, mcp, watch)?,
-        Commands::Annotation { command } => app::annotation::handle_annotation_command(command)?,
-        Commands::Symbol { command } => app::query::handle_symbol_command(command, render_options)?,
+        } => app::serve::handle_serve(path, host, port, mcp, watch, verbose)?,
+        Commands::Annotation { command } => {
+            app::annotation::handle_annotation_command(command, verbose)?
+        }
+        Commands::Symbol { command } => {
+            app::query::handle_symbol_command(command, render_options, verbose)?
+        }
         Commands::Flow { command } => app::query::handle_flow_command(command, render_options)?,
         Commands::L10n { command } => app::query::handle_l10n_command(command, render_options)?,
         Commands::Asset { command } => app::query::handle_asset_command(command, render_options)?,
         Commands::Concept { command } => {
-            app::query::handle_concept_command(command, render_options)?
+            app::query::handle_concept_command(command, render_options, verbose)?
         }
         Commands::Repo { command } => app::query::handle_repo_command(command)?,
     }
