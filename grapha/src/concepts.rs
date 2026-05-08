@@ -261,6 +261,20 @@ struct ScopeSearchContext<'a> {
     annotations: Option<&'a AnnotationIndex>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SymbolTextQuery<'a> {
+    normalized: &'a str,
+    raw: &'a str,
+}
+
+struct SymbolTextScope<'a, F, N> {
+    kind: &'static str,
+    value: Option<&'a str>,
+    query: SymbolTextQuery<'a>,
+    source_value: F,
+    note: N,
+}
+
 fn default_binding_status() -> String {
     STATUS_CONFIRMED.to_string()
 }
@@ -1229,30 +1243,37 @@ fn add_symbol_metadata_scopes(
     normalized_query: &str,
     raw_query: &str,
 ) {
+    let query = SymbolTextQuery {
+        normalized: normalized_query,
+        raw: raw_query,
+    };
+
     for node in &context.graph.nodes {
         add_symbol_text_scope(
             scopes,
             context,
             node,
-            "doc_comment",
-            node.doc_comment.as_deref(),
-            normalized_query,
-            raw_query,
-            |value| value.to_string(),
-            || Some(node.name.clone()),
+            SymbolTextScope {
+                kind: "doc_comment",
+                value: node.doc_comment.as_deref(),
+                query,
+                source_value: |value: &str| value.to_string(),
+                note: || Some(node.name.clone()),
+            },
         );
         add_symbol_text_scope(
             scopes,
             context,
             node,
-            "snippet",
-            should_match_concept_snippet(node.kind)
-                .then_some(node.snippet.as_deref())
-                .flatten(),
-            normalized_query,
-            raw_query,
-            compact_symbol_snippet,
-            || Some(node.name.clone()),
+            SymbolTextScope {
+                kind: "snippet",
+                value: should_match_concept_snippet(node.kind)
+                    .then_some(node.snippet.as_deref())
+                    .flatten(),
+                query,
+                source_value: compact_symbol_snippet,
+                note: || Some(node.name.clone()),
+            },
         );
         if let Some(annotation) = context
             .annotations
@@ -1267,12 +1288,13 @@ fn add_symbol_metadata_scopes(
                 scopes,
                 context,
                 node,
-                "annotation",
-                Some(annotation.text.as_str()),
-                normalized_query,
-                raw_query,
-                |value| value.to_string(),
-                || Some(note.clone()),
+                SymbolTextScope {
+                    kind: "annotation",
+                    value: Some(annotation.text.as_str()),
+                    query,
+                    source_value: |value: &str| value.to_string(),
+                    note: || Some(note.clone()),
+                },
             );
         }
     }
@@ -1282,23 +1304,19 @@ fn add_symbol_text_scope<F, N>(
     scopes: &mut HashMap<String, ScopeAccumulator>,
     context: &ScopeSearchContext<'_>,
     node: &Node,
-    kind: &str,
-    value: Option<&str>,
-    normalized_query: &str,
-    raw_query: &str,
-    source_value: F,
-    note: N,
+    text_scope: SymbolTextScope<'_, F, N>,
 ) where
     F: Fn(&str) -> String,
     N: Fn() -> Option<String>,
 {
-    let Some(value) = value else {
+    let Some(value) = text_scope.value else {
         return;
     };
-    let Some((match_kind, base_score)) = concept_doc_match(value, normalized_query) else {
+    let Some((match_kind, base_score)) = concept_doc_match(value, text_scope.query.normalized)
+    else {
         return;
     };
-    let score = match kind {
+    let score = match text_scope.kind {
         "doc_comment" | "annotation" => base_score + SCORE_SYMBOL_PRECISE_METADATA_BONUS,
         _ => base_score,
     };
@@ -1309,14 +1327,14 @@ fn add_symbol_text_scope<F, N>(
         score,
         STATUS_CANDIDATE,
         ConceptEvidence {
-            kind: kind.to_string(),
-            value: raw_query.trim().to_string(),
+            kind: text_scope.kind.to_string(),
+            value: text_scope.query.raw.trim().to_string(),
             match_kind: match_kind.to_string(),
             table: None,
             key: None,
-            source_value: Some(source_value(value)),
+            source_value: Some((text_scope.source_value)(value)),
             ui_path: Vec::new(),
-            note: note(),
+            note: (text_scope.note)(),
         },
     );
 }
