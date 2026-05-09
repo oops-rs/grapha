@@ -17,3 +17,4 @@ command = "nodus sync"
 [dev-dependencies]
 ena = { github = "oops-rs/ena", branch = "main" }
 fuli = { github = "oops-rs/fuli", branch = "main" }
+nodus = { github = "nodus-rs/nodus", branch = "main" }
