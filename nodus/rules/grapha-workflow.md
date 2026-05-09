@@ -1,21 +1,26 @@
 # Grapha Workflow
 
-- When exploring an unfamiliar part of the codebase, prefer `grapha symbol search` and `grapha symbol context` over reading entire files
-- Before modifying any public API, run `grapha symbol impact` to estimate change scope
-- Before refactoring a type, run `grapha symbol complexity` to assess structural health
-- Use `grapha repo smells` to find code quality issues across the project
-- Use `grapha repo modules` to compare module size and coupling before architectural decisions
-- After significant code changes, run `grapha index .` to keep the graph fresh and refresh indexed snippets
-- Use `grapha repo map` to orient in unfamiliar modules before diving into files
-- When searching for a symbol, start with `grapha symbol search` — it's faster and more precise than grep for symbol-level queries
-- Use `grapha symbol search --file ...` and `--role ...` before broadening to fuzzy search when a symbol name is too common
-- Use `grapha symbol annotate` for durable, reusable symbol notes that should survive future sessions and reduce repeated context loading
-- Prefer annotations for expensive-to-rediscover facts: ownership, business role, invariants, dataflow meaning, migration notes, or cross-module coupling
-- Do not annotate guesses, obvious symbol names, or temporary task-local scratch context
-- Use `grapha annotation serve`, `grapha annotation list`, and `grapha annotation sync` when sharing annotation knowledge across local machines
-- Treat `grapha annotation serve` as a standalone annotation daemon; do not require a project index before starting it
-- Treat annotation identity as project-scoped by default, not branch-scoped; branch changes should not hide durable symbol knowledge
-- Configure annotation sync with `[annotations].server` in project/global Grapha config, `GRAPHA_ANNOTATION_SERVER`, or an explicit `--server` override
-- Configure project graph serving with `[serve].host`, `[serve].port`, and `[serve].watch` when a project should have stable `grapha serve` defaults
-- Use `$XDG_CONFIG_HOME/grapha/config.toml`, `~/.config/grapha/config.toml`, or `~/.grapha/config.toml` for developer-level Grapha defaults
-- Prefer setting `[repo].name` in `grapha.toml` before syncing non-Git project copies that should share the same annotation identity
+Always-loaded routing rule. Detail lives in skills — load the matching specialist on demand.
+
+## Routing policy
+
+- **Grapha-first.** Use Grapha **before** raw tools (`Read`, `Grep`, `Glob`, `find`, `cat`, `rg`) whenever the question is about symbols, callers/callees, impact, dataflow, complexity, smells, repo shape, or stored code knowledge. Raw tools are for non-symbol concerns (reading a known path, scanning markdown/JSON, grepping plain string literals).
+- **MCP-first, CLI-fallback.** If `mcp__grapha__*` tools are present in this session, use them. Otherwise fall back to the `grapha` CLI. No probe call needed — the tool list tells you.
+
+## Skill dispatch
+
+Load `using-grapha` first when in doubt; it explains the model and points at specialists. Otherwise jump straight to:
+
+- **`grapha-search`** — find symbols, read 360° context, list file symbols, orient in modules.
+- **`grapha-quality`** — impact, complexity, smells, module summary.
+- **`grapha-dataflow`** — forward/reverse trace, entry points.
+- **`grapha-knowledge`** — annotations and concept bindings (durable code knowledge).
+
+If the request maps to one of these, load that skill before reaching for raw tools.
+
+## Hard rules
+
+- Never read a whole file to "see what's in it" before asking Grapha. Use `mcp__grapha__get_file_symbols` (CLI: `grapha symbol search --file <path>`) first, then `Read` only the slice you need.
+- Never `Grep` for a function or type name. That's `grapha-search`.
+- Before modifying any public API, run impact (`grapha-quality`).
+- After significant code changes, refresh the index (`grapha index .`) and reload the MCP server (`mcp__grapha__reload`) if mounted.
