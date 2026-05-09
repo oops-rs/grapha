@@ -769,20 +769,19 @@ fn index_creates_sqlite_db() {
         ])
         .assert()
         .success()
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("indexed"));
 
     assert!(store_dir.join("grapha.db").exists());
     assert!(store_dir.join("localization.json").exists());
 }
 
 #[test]
-fn verbose_index_reports_progress() {
+fn index_reports_phase_progress_by_default() {
     let dir = tempfile::tempdir().unwrap();
     let store_dir = dir.path().join(".grapha");
 
     grapha()
         .args([
-            "--verbose",
             "index",
             "tests/fixtures/simple.rs",
             "--store-dir",
@@ -790,6 +789,8 @@ fn verbose_index_reports_progress() {
         ])
         .assert()
         .success()
+        .stderr(predicate::str::contains("saved to"))
+        .stderr(predicate::str::contains("built search index"))
         .stderr(predicate::str::contains("indexed"));
 
     assert!(store_dir.join("grapha.db").exists());
@@ -871,7 +872,6 @@ fn index_reuses_cached_extractions_when_sources_are_unchanged() {
 
     grapha()
         .args([
-            "--verbose",
             "index",
             dir.path().to_str().unwrap(),
             "--store-dir",
@@ -2324,7 +2324,6 @@ fn repeated_index_uses_incremental_store_and_search() {
 
     grapha()
         .args([
-            "--verbose",
             "index",
             dir.path().to_str().unwrap(),
             "--store-dir",
@@ -2342,7 +2341,6 @@ fn repeated_index_uses_incremental_store_and_search() {
 
     grapha()
         .args([
-            "--verbose",
             "index",
             dir.path().to_str().unwrap(),
             "--store-dir",

@@ -913,7 +913,7 @@ fn main() -> anyhow::Result<()> {
             store_dir,
             full_rebuild,
             timing,
-        } => app::index::handle_index(path, format, store_dir, full_rebuild, timing, verbose)?,
+        } => app::index::handle_index(path, format, store_dir, full_rebuild, timing)?,
         Commands::Migrate { path, from, force } => app::migrate::handle_migrate(path, from, force)?,
         Commands::Serve {
             path,

@@ -219,10 +219,9 @@ pub(crate) fn handle_index(
     store_dir: Option<PathBuf>,
     full_rebuild: bool,
     timing: bool,
-    verbose: bool,
 ) -> anyhow::Result<()> {
     let total_start = Instant::now();
-    let show_progress = verbose || timing;
+    let show_progress = true;
     let store_path = store_dir.unwrap_or_else(|| path.join(".grapha"));
     let config = crate::config::load_config(&path);
     let mut work_plan = None;
@@ -310,7 +309,7 @@ pub(crate) fn handle_index(
 
     let pipeline = crate::app::pipeline::run_pipeline(
         &path,
-        verbose,
+        show_progress,
         timing,
         previous_extraction_cache.as_ref(),
     )?;
