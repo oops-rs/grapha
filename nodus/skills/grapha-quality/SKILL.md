@@ -1,11 +1,9 @@
 ---
 name: grapha-quality
-description: Assess change risk and structural health with Grapha — blast radius, type complexity, code smells, module coupling. Load before modifying public APIs, before refactoring a type, when prioritizing cleanup, or when comparing module size/coupling. MCP-first; CLI fallback.
+description: "Use when work in this repo needs blast-radius checks, type complexity, code smells, or module size and coupling analysis."
 ---
 
 # Grapha — quality & change risk
-
-Assess the structural cost of a change before making it. **MCP-first** (`mcp__grapha__*`); fall back to the `grapha` CLI.
 
 ## Tool map
 

@@ -1,6 +1,6 @@
 ---
 name: grapha-knowledge
-description: Persist and recall durable code knowledge through Grapha — symbol annotations (ownership, invariants, business role) and concept bindings (business term → code). Load when capturing reusable facts you don't want future agents to re-derive, or when resolving a product/business term to its code surface. MCP-first for read/write of records; CLI for the annotation daemon and sync.
+description: "Use when work in this repo needs to persist or recall symbol annotations (ownership, invariants, role) or concept bindings (business term → code)."
 ---
 
 # Grapha — durable knowledge
@@ -9,8 +9,6 @@ Two persistent layers Grapha maintains on top of the graph:
 
 - **Annotations** — short, agent-written notes attached to a symbol by ID/USR. Future agents read them via `get_symbol_context` and can save the cost of re-deriving the same context.
 - **Concepts** — business/product terms bound to one or more code symbols, with aliases. Lets agents resolve "the room invitation flow" to actual symbols without rediscovering them every session.
-
-**MCP-first** (`mcp__grapha__*`) for the record-level read/write tools; **CLI** for the annotation service daemon and sync.
 
 ## Annotation tool map
 

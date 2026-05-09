@@ -1,11 +1,9 @@
 ---
 name: grapha-search
-description: Find symbols, read 360° context, list file symbols, and orient in unfamiliar modules using Grapha. Load when the task is "where is X defined", "who calls / what does X call", "what symbols are in this file", or "what does this module look like" — before reaching for Grep/Glob/Read.
+description: "Use when work in this repo needs to find symbols, read callers/callees, get 360° context, or list file symbols."
 ---
 
 # Grapha — search & orient
-
-Discover symbols and read their relationships through Grapha instead of grepping or reading whole files. **MCP-first** (`mcp__grapha__*`); fall back to the `grapha` CLI if MCP is not mounted.
 
 ## Tool map
 
@@ -37,4 +35,3 @@ Discover symbols and read their relationships through Grapha instead of grepping
 
 - Score-band clustering (`cluster: true`, `cluster_id`, `cluster_page`) is useful when a query returns hundreds of matches — page through `excellent`/`strong`/`possible`/`weak` bands instead of skimming a flat list.
 - If snippets look truncated or stale, run `grapha index .` (and `mcp__grapha__reload` if MCP is mounted), then retry — the snippets are stored at index time.
-- Only fall back to `Grep`/`Read` after Grapha returns empty or clearly off-target results — and never for a symbol name search.

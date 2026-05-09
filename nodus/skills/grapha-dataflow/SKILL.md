@@ -1,11 +1,9 @@
 ---
 name: grapha-dataflow
-description: Trace data forward from a symbol to terminals (network, persistence, cache, event), or reverse from a symbol back to entry points, using Grapha. Load when reasoning about how data reaches a sink, which entry points exercise a code path, or auditing a flow before changing it. MCP-first; CLI fallback.
+description: "Use when work in this repo needs forward dataflow traces to terminals, reverse traces to entry points, or entry-point listings."
 ---
 
 # Grapha — dataflow tracing
-
-Follow data through the graph instead of hand-walking call chains. **MCP-first** (`mcp__grapha__*`); fall back to the `grapha` CLI.
 
 ## Tool map
 

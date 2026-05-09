@@ -1,48 +1,44 @@
 ---
 name: using-grapha
-description: Orientation for Grapha — when to use it, how to detect MCP, and which specialist skill to load for which task. Load whenever the question touches symbols, callers/callees, impact, dataflow, complexity, smells, repo shape, or stored code knowledge (annotations, concepts).
+description: "Use at the start of any code task in this repo — sets the Grapha workflow and points at the right specialist."
 ---
 
 # Using Grapha
 
-Grapha is the first-line code intelligence layer for this repo. Reach for it **before** raw tools (`Read`, `Grep`, `Glob`, `find`, `cat`, `rg`) whenever the question is about symbols rather than raw text.
+You're doing normal coding work in a repo where Grapha is installed. Grapha is a code intelligence layer that indexes symbols, callers/callees, impact, dataflow, complexity, and durable annotations. Use it as a tool inside your normal workflow, not as a workflow of its own.
 
-## Routing policy
+## Where Grapha fits
 
-- **Grapha-first.** If the question can be phrased in symbol terms (where is `Foo`, who calls `Foo`, what breaks if `Foo` changes, is `Foo` complex, what does `Foo`'s data flow into), route through Grapha. Raw tools are for non-symbol concerns: reading a known path, scanning markdown/JSON/YAML, grepping plain string literals.
-- **MCP-first, CLI-fallback.** If the `grapha` MCP server is mounted (look for `mcp__grapha__*` tools in the available/deferred tool list this session), call those — structured JSON, shared running graph, no per-query process spawn. Otherwise fall back to the `grapha` CLI.
-- **No probe call needed** to detect MCP — the tool list tells you whether it's mounted.
+- **Orienting in unfamiliar code.** Don't `Grep` for a function or type name; don't `Read` a whole file to "see what's in it." Ask Grapha for symbols, 360° context, or a file's symbol map — then `Read` only the slice you need. Specialist: `grapha-search`.
+- **Reasoning about a change.** Before modifying a public API, refactoring a type, or prioritizing cleanup, check blast radius / complexity / smells. Specialist: `grapha-quality`.
+- **Following data.** When the question is "where does this end up?" or "which entry points reach here?", trace it instead of reading code paths by hand. Specialist: `grapha-dataflow`.
+- **Persisting or recalling durable knowledge.** Ownership, invariants, business role, or product-term ↔ code mappings — annotate them so the next session doesn't re-derive them. Specialist: `grapha-knowledge`.
 
-## Specialist skills (load on demand)
+Load the matching specialist skill when you reach that step — don't pre-load. If the task crosses several steps, load each as you get there.
 
-Pick the specialist whose purpose matches the task:
+## Specialist map
 
-| Task family | Skill | Covers |
+| If your step is… | Load… | It covers |
 |---|---|---|
 | Find / read / orient | `grapha-search` | `search_symbols`, `get_symbol_context`, `batch_context`, `get_file_symbols`, `get_file_map` |
 | Assess change risk and structural health | `grapha-quality` | `get_impact`, `analyze_complexity`, `detect_smells`, `get_module_summary` |
 | Trace data through the graph | `grapha-dataflow` | `trace` (forward/reverse), flow entries |
 | Persist / read durable code knowledge | `grapha-knowledge` | `annotate_symbol`, annotation serve/list/sync, concept search/bind/alias |
 
-If a task spans more than one family (e.g., "find the symbol, then check impact, then annotate it"), load each specialist as you reach that step — don't pre-load.
+## Access mode
 
-## When raw tools *are* the right answer
-
-- You already know the exact path (often because Grapha just gave it to you) and need to read a specific slice. Use `Read` with `offset`/`limit`.
-- You're searching markdown, JSON, YAML, or other non-source text where Grapha has no opinion.
-- You're grepping for a plain string literal with no symbol meaning (a hard-coded URL, an error message, an env-var name).
-
-If you're tempted to `Grep` for a function or type name, stop and use `grapha-search` instead — it understands declarations, USRs, modules, and roles.
+If `mcp__grapha__*` tools are present in the session, use the MCP path. Otherwise use the `grapha` CLI. The tool list tells you which is available — no probe call needed.
 
 ## Index freshness
 
-The MCP server typically runs as `grapha serve --mcp --watch -p .`, so it auto-refreshes. If results look stale after a large refactor:
-
-- MCP: `mcp__grapha__get_index_status` to confirm, `mcp__grapha__reload` to pick up new index.
-- CLI: `grapha repo status` to confirm, `grapha index .` to re-index, then restart the server (or rely on `--watch`).
+After significant code changes, refresh the index: `mcp__grapha__reload` (MCP) or `grapha index .` (CLI). MCP commonly runs with `--watch` and auto-refreshes. To confirm freshness: `mcp__grapha__get_index_status` (MCP) or `grapha repo status` (CLI).
 
 ## Configuration pointers
 
-- Project: `grapha.toml` — set `[serve].host`/`[serve].port`/`[serve].watch` for stable serve defaults; `[annotations].server` for sync target; `[repo].name` for non-Git project copies sharing one annotation identity.
+- Project: `grapha.toml` — `[serve].host`/`[serve].port`/`[serve].watch` for stable serve defaults; `[annotations].server` for sync target; `[repo].name` for non-Git project copies sharing one annotation identity.
 - Developer-level defaults: `$GRAPHA_CONFIG`, `$XDG_CONFIG_HOME/grapha/config.toml`, `~/.config/grapha/config.toml`, or `~/.grapha/config.toml`.
-- Override at runtime: `GRAPHA_ANNOTATION_SERVER`, or `--server` on individual annotation commands.
+- Runtime overrides: `GRAPHA_ANNOTATION_SERVER`, or `--server` on individual annotation commands.
+
+## Raw tools are still right when…
+
+…the work isn't about symbols: reading a known path, scanning markdown/JSON/YAML, or grepping a plain string literal (URL, error message, env-var name).
