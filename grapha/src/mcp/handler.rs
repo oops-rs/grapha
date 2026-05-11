@@ -132,6 +132,15 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "description": "Return score-band clusters for context list sections",
                         "default": false
                     },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum items per context section when cluster is false (default: 20)",
+                        "default": 20
+                    },
+                    "fields": {
+                        "type": "string",
+                        "description": "Optional comma-separated projected symbol fields to include (file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or full/all/none)"
+                    },
                     "cluster_id": {
                         "type": "string",
                         "description": "Score-band cluster to page: excellent, strong, possible, weak, or unknown"
@@ -188,6 +197,15 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "integer",
                         "description": "Maximum traversal depth (default: 3)",
                         "default": 3
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum items per depth bucket when cluster is false (default: 20)",
+                        "default": 20
+                    },
+                    "fields": {
+                        "type": "string",
+                        "description": "Optional comma-separated projected symbol fields to include (file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or full/all/none)"
                     },
                     "cluster": {
                         "type": "boolean",
@@ -246,6 +264,15 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "depth": {
                         "type": "integer",
                         "description": "Maximum traversal depth (default: 10 for forward, unlimited for reverse)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum forward flows or reverse entries when cluster is false (default: 20)",
+                        "default": 20
+                    },
+                    "fields": {
+                        "type": "string",
+                        "description": "Optional comma-separated projected symbol fields to include (file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or full/all/none)"
                     },
                     "cluster": {
                         "type": "boolean",
@@ -318,6 +345,15 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Array of symbol names or IDs"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum items per context section for each symbol (default: 20)",
+                        "default": 20
+                    },
+                    "fields": {
+                        "type": "string",
+                        "description": "Optional comma-separated projected symbol fields to include (file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or full/all/none)"
                     }
                 },
                 "required": ["symbols"]
@@ -556,6 +592,89 @@ fn serialize_result<T: serde::Serialize>(result: &T) -> Value {
     }
 }
 
+fn serialize_result_with_fields<T: serde::Serialize>(
+    result: &T,
+    fields: Option<FieldSet>,
+) -> Value {
+    let Some(fields) = fields else {
+        return serialize_result(result);
+    };
+
+    match serde_json::to_value(result) {
+        Ok(mut value) => {
+            project_symbol_fields(&mut value, fields);
+            match serde_json::to_string_pretty(&value) {
+                Ok(json) => text_content(json),
+                Err(e) => tool_error(format!("failed to serialize result: {e}")),
+            }
+        }
+        Err(e) => tool_error(format!("failed to serialize result: {e}")),
+    }
+}
+
+fn project_symbol_fields(value: &mut Value, fields: FieldSet) {
+    match value {
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                project_symbol_fields(value, fields);
+            }
+
+            if is_symbol_object(object) {
+                if !fields.id {
+                    object.remove("id");
+                }
+                if !fields.file {
+                    object.remove("file");
+                }
+                if !fields.locator {
+                    object.remove("locator");
+                }
+                if !fields.module {
+                    object.remove("module");
+                }
+                if !fields.repo {
+                    object.remove("repo");
+                }
+                if !fields.span {
+                    object.remove("span");
+                }
+                if !fields.snippet {
+                    object.remove("snippet");
+                }
+                if !fields.visibility {
+                    object.remove("visibility");
+                }
+                if !fields.signature {
+                    object.remove("signature");
+                }
+                if !fields.doc_comment {
+                    object.remove("doc_comment");
+                }
+                if !fields.annotation {
+                    object.remove("annotation");
+                }
+                if !fields.role {
+                    object.remove("role");
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                project_symbol_fields(item, fields);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_symbol_object(object: &serde_json::Map<String, Value>) -> bool {
+    object.contains_key("name")
+        && object.contains_key("kind")
+        && (object.contains_key("id")
+            || object.contains_key("file")
+            || object.contains_key("locator"))
+}
+
 fn cluster_options_from_arguments(arguments: &Value) -> Option<cluster::ClusterOptions> {
     arguments
         .get("cluster")
@@ -582,6 +701,21 @@ fn cluster_options_from_arguments(arguments: &Value) -> Option<cluster::ClusterO
                     .max(1) as usize,
             )
         })
+}
+
+fn limit_from_arguments(arguments: &Value, default: usize) -> usize {
+    arguments
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|value| value.max(1) as usize)
+        .unwrap_or(default)
+}
+
+fn fields_from_arguments(arguments: &Value) -> Option<FieldSet> {
+    arguments
+        .get("fields")
+        .and_then(|v| v.as_str())
+        .map(FieldSet::parse)
 }
 
 pub fn handle_tool_call(state: &mut McpState, tool_name: &str, arguments: &Value) -> Value {
@@ -751,18 +885,17 @@ fn handle_get_symbol_context(state: &mut McpState, arguments: &Value) -> Value {
         Err(e) => return e,
     };
     let cluster_options = cluster_options_from_arguments(arguments);
+    let fields = fields_from_arguments(arguments);
+    let limit = cluster_options
+        .as_ref()
+        .map(|options| options.candidate_limit)
+        .unwrap_or_else(|| limit_from_arguments(arguments, 20));
 
-    let result = if let Some(options) = cluster_options.as_ref() {
-        query::context::query_context_with_options(
-            &state.graph,
-            &symbol_id,
-            &query::context::ContextQueryOptions {
-                limit: options.candidate_limit,
-            },
-        )
-    } else {
-        query::context::query_context(&state.graph, &symbol_id)
-    };
+    let result = query::context::query_context_with_options(
+        &state.graph,
+        &symbol_id,
+        &query::context::ContextQueryOptions { limit },
+    );
 
     match result {
         Ok(mut result) => {
@@ -774,7 +907,7 @@ fn handle_get_symbol_context(state: &mut McpState, arguments: &Value) -> Value {
             if let Some(options) = cluster_options.as_ref() {
                 serialize_result(&cluster::context_result(&result, &state.graph, options))
             } else {
-                serialize_result(&result)
+                serialize_result_with_fields(&result, fields)
             }
         }
         Err(e) => tool_error(format_query_error(&e)),
@@ -822,26 +955,25 @@ fn handle_get_impact(state: &mut McpState, arguments: &Value) -> Value {
     };
     let depth = arguments.get("depth").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
     let cluster_options = cluster_options_from_arguments(arguments);
+    let fields = fields_from_arguments(arguments);
+    let limit = cluster_options
+        .as_ref()
+        .map(|options| options.candidate_limit)
+        .unwrap_or_else(|| limit_from_arguments(arguments, 20));
 
-    let result = if let Some(options) = cluster_options.as_ref() {
-        query::impact::query_impact_with_options(
-            &state.graph,
-            &symbol_id,
-            depth,
-            &query::impact::ImpactQueryOptions {
-                limit: options.candidate_limit,
-            },
-        )
-    } else {
-        query::impact::query_impact(&state.graph, &symbol_id, depth)
-    };
+    let result = query::impact::query_impact_with_options(
+        &state.graph,
+        &symbol_id,
+        depth,
+        &query::impact::ImpactQueryOptions { limit },
+    );
 
     match result {
         Ok(result) => {
             if let Some(options) = cluster_options.as_ref() {
                 serialize_result(&cluster::impact_result(&result, options))
             } else {
-                serialize_result(&result)
+                serialize_result_with_fields(&result, fields)
             }
         }
         Err(e) => tool_error(format_query_error(&e)),
@@ -869,28 +1001,27 @@ fn handle_trace(state: &mut McpState, arguments: &Value) -> Value {
         .unwrap_or("forward");
     let depth = arguments.get("depth").and_then(|v| v.as_u64());
     let cluster_options = cluster_options_from_arguments(arguments);
+    let fields = fields_from_arguments(arguments);
+    let limit = cluster_options
+        .as_ref()
+        .map(|options| options.candidate_limit)
+        .unwrap_or_else(|| limit_from_arguments(arguments, 20));
 
     match direction {
         "forward" => {
             let max_depth = depth.unwrap_or(10) as usize;
-            let result = if let Some(options) = cluster_options.as_ref() {
-                query::trace::query_trace_with_options(
-                    &state.graph,
-                    &symbol_id,
-                    max_depth,
-                    &query::trace::TraceQueryOptions {
-                        limit: options.candidate_limit,
-                    },
-                )
-            } else {
-                query::trace::query_trace(&state.graph, &symbol_id, max_depth)
-            };
+            let result = query::trace::query_trace_with_options(
+                &state.graph,
+                &symbol_id,
+                max_depth,
+                &query::trace::TraceQueryOptions { limit },
+            );
             match result {
                 Ok(result) => {
                     if let Some(options) = cluster_options.as_ref() {
                         serialize_result(&cluster::trace_result(&result, options))
                     } else {
-                        serialize_result(&result)
+                        serialize_result_with_fields(&result, fields)
                     }
                 }
                 Err(e) => tool_error(format_query_error(&e)),
@@ -898,24 +1029,18 @@ fn handle_trace(state: &mut McpState, arguments: &Value) -> Value {
         }
         "reverse" => {
             let max_depth = depth.map(|d| d as usize);
-            let result = if let Some(options) = cluster_options.as_ref() {
-                query::reverse::query_reverse_with_options(
-                    &state.graph,
-                    &symbol_id,
-                    max_depth,
-                    &query::reverse::ReverseQueryOptions {
-                        limit: options.candidate_limit,
-                    },
-                )
-            } else {
-                query::reverse::query_reverse(&state.graph, &symbol_id, max_depth)
-            };
+            let result = query::reverse::query_reverse_with_options(
+                &state.graph,
+                &symbol_id,
+                max_depth,
+                &query::reverse::ReverseQueryOptions { limit },
+            );
             match result {
                 Ok(result) => {
                     if let Some(options) = cluster_options.as_ref() {
                         serialize_result(&cluster::reverse_result(&result, options))
                     } else {
-                        serialize_result(&result)
+                        serialize_result_with_fields(&result, fields)
                     }
                 }
                 Err(e) => tool_error(format_query_error(&e)),
@@ -965,6 +1090,8 @@ fn handle_batch_context(state: &mut McpState, arguments: &Value) -> Value {
     let annotations = annotations::AnnotationStore::for_project_root(&state.project_root)
         .load_index()
         .ok();
+    let fields = fields_from_arguments(arguments);
+    let limit = limit_from_arguments(arguments, 20);
     let mut results: Vec<Value> = Vec::with_capacity(symbol_strs.len());
     for symbol in &symbol_strs {
         let resolved = resolve_symbol(state, symbol);
@@ -972,14 +1099,22 @@ fn handle_batch_context(state: &mut McpState, arguments: &Value) -> Value {
             Ok(id) => id.as_str(),
             Err(_) => symbol,
         };
-        match query::context::query_context(&state.graph, query_id) {
+        match query::context::query_context_with_options(
+            &state.graph,
+            query_id,
+            &query::context::ContextQueryOptions { limit },
+        ) {
             Ok(mut ctx) => {
                 if let Some(annotations) = annotations.as_ref() {
                     ctx.apply_annotations(&state.graph, annotations);
                 }
+                let mut result = serde_json::to_value(&ctx).unwrap_or(Value::Null);
+                if let Some(fields) = fields {
+                    project_symbol_fields(&mut result, fields);
+                }
                 results.push(json!({
                     "query": symbol,
-                    "result": serde_json::to_value(&ctx).unwrap_or(Value::Null),
+                    "result": result,
                 }));
             }
             Err(e) => {
@@ -1343,6 +1478,65 @@ mod tests {
     }
 
     #[test]
+    fn get_symbol_context_respects_limit_and_fields() {
+        let mut state = make_test_state_with_context();
+        let result = handle_tool_call(
+            &mut state,
+            "get_symbol_context",
+            &json!({
+                "symbol": "target",
+                "limit": 1,
+                "fields": "locator"
+            }),
+        );
+
+        assert!(
+            !result
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
+        let parsed = text_json(&result);
+        assert_eq!(parsed["total_callers"], 2);
+        assert_eq!(parsed["callers"].as_array().unwrap().len(), 1);
+        let caller = &parsed["callers"][0];
+        assert_eq!(caller["name"], "caller_a");
+        assert!(caller.get("locator").is_some());
+        assert!(caller.get("id").is_none());
+        assert!(caller.get("file").is_none());
+        assert!(caller.get("span").is_none());
+    }
+
+    #[test]
+    fn batch_context_respects_limit_and_fields() {
+        let mut state = make_test_state_with_context();
+        let result = handle_tool_call(
+            &mut state,
+            "batch_context",
+            &json!({
+                "symbols": ["target"],
+                "limit": 1,
+                "fields": "file"
+            }),
+        );
+
+        assert!(
+            !result
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
+        let parsed = text_json(&result);
+        let entry = &parsed[0]["result"];
+        assert_eq!(entry["total_callers"], 2);
+        assert_eq!(entry["callers"].as_array().unwrap().len(), 1);
+        let caller = &entry["callers"][0];
+        assert_eq!(caller["file"], "src/caller_a.rs");
+        assert!(caller.get("locator").is_none());
+        assert!(caller.get("id").is_none());
+    }
+
+    #[test]
     fn detect_smells_on_empty_graph() {
         let mut state = make_test_state();
         let result = handle_tool_call(&mut state, "detect_smells", &json!({}));
@@ -1399,11 +1593,76 @@ mod tests {
         );
     }
 
+    fn text_json(result: &Value) -> Value {
+        let text = result["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str(text).unwrap()
+    }
+
     fn make_test_state() -> McpState {
         let graph = Graph {
             version: String::new(),
             nodes: vec![],
             edges: vec![],
+        };
+        let schema = tantivy::schema::Schema::builder().build();
+        let index = Index::create_in_ram(schema);
+        McpState {
+            graph,
+            search_index: index,
+            project_root: PathBuf::from("/tmp/project"),
+            store_path: PathBuf::from("/tmp/test"),
+            recall: Recall::new(),
+        }
+    }
+
+    fn make_test_state_with_context() -> McpState {
+        fn node(id: &str, name: &str, file: &str) -> Node {
+            Node {
+                id: id.into(),
+                kind: NodeKind::Function,
+                name: name.into(),
+                file: PathBuf::from(file),
+                span: Span {
+                    start: [1, 0],
+                    end: [3, 0],
+                },
+                visibility: Visibility::Public,
+                metadata: HashMap::new(),
+                role: None,
+                signature: Some(format!("fn {name}()")),
+                doc_comment: None,
+                module: Some("App".to_string()),
+                snippet: Some(format!("fn {name}() {{}}")),
+                repo: None,
+            }
+        }
+
+        fn edge(source: &str, target: &str) -> Edge {
+            Edge {
+                source: source.into(),
+                target: target.into(),
+                kind: EdgeKind::Calls,
+                confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
+                provenance: vec![],
+                repo: None,
+            }
+        }
+
+        let graph = Graph {
+            version: String::new(),
+            nodes: vec![
+                node("src/caller_a.rs::caller_a", "caller_a", "src/caller_a.rs"),
+                node("src/caller_b.rs::caller_b", "caller_b", "src/caller_b.rs"),
+                node("src/target.rs::target", "target", "src/target.rs"),
+            ],
+            edges: vec![
+                edge("src/caller_a.rs::caller_a", "src/target.rs::target"),
+                edge("src/caller_b.rs::caller_b", "src/target.rs::target"),
+            ],
         };
         let schema = tantivy::schema::Schema::builder().build();
         let index = Index::create_in_ram(schema);
