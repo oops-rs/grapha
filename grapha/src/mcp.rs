@@ -197,7 +197,7 @@ mod tests {
         let resp = dispatch(&mut state, json!(2), "tools/list", &json!({}));
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), handler::tool_definitions().len());
     }
 
     #[test]
