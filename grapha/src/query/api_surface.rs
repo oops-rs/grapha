@@ -60,6 +60,12 @@ fn is_api_member_kind(kind: NodeKind) -> bool {
     )
 }
 
+fn is_api_member(node: &Node) -> bool {
+    is_api_member_kind(node.kind)
+        && !node.name.starts_with("getter:")
+        && !node.name.starts_with("setter:")
+}
+
 fn is_visible_member(node: &Node, options: ApiSurfaceOptions) -> bool {
     options.include_private || node.visibility != Visibility::Private
 }
@@ -68,6 +74,24 @@ fn owner_node_mentions_type(owner: &Node, target: &Node) -> bool {
     matches!(owner.kind, NodeKind::Extension | NodeKind::Impl)
         && (normalize_symbol_name(&owner.name) == normalize_symbol_name(&target.name)
             || owner.name.contains(&target.name))
+}
+
+fn id_implies_member(node: &Node, target: &Node) -> bool {
+    if node.id == target.id {
+        return false;
+    }
+
+    if target.id.starts_with("s:") {
+        return node.id.starts_with(&target.id)
+            || node
+                .id
+                .strip_prefix("s:e:")
+                .is_some_and(|rest| rest.starts_with(&target.id));
+    }
+
+    node.id
+        .strip_prefix(&target.id)
+        .is_some_and(|rest| rest.starts_with("::"))
 }
 
 pub fn query_api_surface(
@@ -121,8 +145,24 @@ pub fn query_api_surface(
     }
 
     let mut members = Vec::new();
-    let mut member_ids = HashSet::new();
-    let mut referenced_type_ids = HashSet::new();
+    let mut member_ids: HashSet<String> = HashSet::new();
+    let mut referenced_type_ids: HashSet<String> = HashSet::new();
+
+    let mut add_member = |owner: &Node, member: &Node| {
+        if !is_api_member(member) || !is_visible_member(member, options) {
+            return;
+        }
+        if !member_ids.insert(member.id.clone()) {
+            return;
+        }
+        if let Some(type_ids) = referenced_by_member.get(member.id.as_str()) {
+            referenced_type_ids.extend(type_ids.iter().map(|id| (*id).to_string()));
+        }
+        members.push(ApiMember {
+            symbol: to_symbol_ref(member, &locators),
+            owner: to_symbol_ref(owner, &locators),
+        });
+    };
 
     let mut sorted_owner_ids: Vec<&str> = owner_ids.into_iter().collect();
     sorted_owner_ids.sort_unstable();
@@ -137,19 +177,13 @@ pub fn query_api_surface(
             let Some(member) = node_index.get(*child_id).copied() else {
                 continue;
             };
-            if !is_api_member_kind(member.kind) || !is_visible_member(member, options) {
-                continue;
-            }
-            if !member_ids.insert(member.id.as_str()) {
-                continue;
-            }
-            if let Some(type_ids) = referenced_by_member.get(member.id.as_str()) {
-                referenced_type_ids.extend(type_ids.iter().copied());
-            }
-            members.push(ApiMember {
-                symbol: to_symbol_ref(member, &locators),
-                owner: to_symbol_ref(owner, &locators),
-            });
+            add_member(owner, member);
+        }
+    }
+
+    for member in &graph.nodes {
+        if id_implies_member(member, target) {
+            add_member(target, member);
         }
     }
 
@@ -163,7 +197,7 @@ pub fn query_api_surface(
 
     let mut referenced_types: Vec<SymbolRef> = referenced_type_ids
         .into_iter()
-        .filter_map(|id| node_index.get(id).copied())
+        .filter_map(|id| node_index.get(id.as_str()).copied())
         .map(|node| to_symbol_ref(node, &locators))
         .collect();
     referenced_types.sort_by(|left, right| {
@@ -306,5 +340,49 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.members[0].symbol.name, "debugOnly()");
+    }
+
+    #[test]
+    fn api_surface_infers_members_from_symbol_ids_when_contains_edges_are_missing() {
+        let graph = Graph {
+            version: String::new(),
+            nodes: vec![
+                node(
+                    "s:4Gift0A11ServiceCoreC",
+                    "GiftServiceCore",
+                    NodeKind::Class,
+                    Visibility::Public,
+                ),
+                node(
+                    "s:4Gift0A11ServiceCoreC04sendA03reqyF",
+                    "sendGift(req:)",
+                    NodeKind::Function,
+                    Visibility::Public,
+                ),
+                node(
+                    "s:4Gift0A11ServiceCoreC8giftsMapSDvp",
+                    "giftsMap",
+                    NodeKind::Property,
+                    Visibility::Public,
+                ),
+                node(
+                    "s:4Gift0A11ServiceCoreC8giftsMapSDvg",
+                    "getter:giftsMap",
+                    NodeKind::Function,
+                    Visibility::Public,
+                ),
+            ],
+            edges: vec![],
+        };
+
+        let result =
+            query_api_surface(&graph, "GiftServiceCore", ApiSurfaceOptions::default()).unwrap();
+
+        let names: Vec<_> = result
+            .members
+            .iter()
+            .map(|member| member.symbol.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["giftsMap", "sendGift(req:)"]);
     }
 }
