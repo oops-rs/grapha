@@ -72,7 +72,7 @@ grapha concept search "送礼横幅" --format tree
 grapha concept bind "送礼横幅" --symbol GiftBannerPage --symbol GiftBannerViewModel
 
 # 通过 MCP 提供给 AI 智能体
-grapha serve --mcp --watch
+grapha mcp --watch
 ```
 
 ## CLI 指南
@@ -83,13 +83,15 @@ grapha serve --mcp --watch
 grapha index <path> [--format sqlite|json] [--store-dir DIR] [--full-rebuild] [--timing]
 grapha migrate [-p PATH] [--from OTHER_WORKTREE_OR_STORE] [--force]
 grapha analyze <path> [--output FILE] [--compact] [--filter fn,struct]
-grapha serve [-p PATH] [--mcp] [--watch[=true|false]] [--host HOST] [--port N]
+grapha serve [-p PATH] [--host HOST] [--port N]
+grapha mcp [-p PATH] [--watch[=true|false]]
 ```
 
 - `index` 是常用入口。默认把图数据、搜索数据、国际化快照、资源快照和新鲜度元数据写入 `.grapha/`。
 - `migrate` 可以从另一个本地 Grapha store 引导当前 worktree，让新分支在完整重建前也能回答查询。
 - `analyze` 用于一次性输出图，方便临时检查。
-- `serve` 运行 HTTP 图浏览器，或通过 stdio 运行 MCP 服务器。
+- `serve` 运行 HTTP 图浏览器。
+- `mcp` 通过 stdio 为 AI 智能体运行 MCP 服务器。旧的 `grapha serve --mcp` 形式仍兼容可用。
 
 ### 符号智能
 
@@ -174,7 +176,7 @@ grapha annotation sync --server http://HOST:8080
 
 ```bash
 grapha index .
-grapha serve --mcp --watch -p .
+grapha mcp --watch -p .
 ```
 
 添加到 MCP 客户端：
@@ -184,7 +186,7 @@ grapha serve --mcp --watch -p .
   "mcpServers": {
     "grapha": {
       "command": "grapha",
-      "args": ["serve", "--mcp", "--watch", "-p", "."]
+      "args": ["mcp", "--watch", "-p", "."]
     }
   }
 }

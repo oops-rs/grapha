@@ -76,7 +76,7 @@ grapha concept search "送礼横幅" --format tree
 grapha concept bind "送礼横幅" --symbol GiftBannerPage --symbol GiftBannerViewModel
 
 # Serve Grapha to AI agents through MCP
-grapha serve --mcp --watch
+grapha mcp --watch
 ```
 
 ## CLI Guide
@@ -87,13 +87,15 @@ grapha serve --mcp --watch
 grapha index <path> [--format sqlite|json] [--store-dir DIR] [--full-rebuild] [--timing]
 grapha migrate [-p PATH] [--from OTHER_WORKTREE_OR_STORE] [--force]
 grapha analyze <path> [--output FILE] [--compact] [--filter fn,struct]
-grapha serve [-p PATH] [--mcp] [--watch[=true|false]] [--host HOST] [--port N]
+grapha serve [-p PATH] [--host HOST] [--port N]
+grapha mcp [-p PATH] [--watch[=true|false]]
 ```
 
 - `index` is the normal entry point. It stores graph data, search data, localization snapshots, asset snapshots, and freshness metadata under `.grapha/` by default.
 - `migrate` bootstraps a worktree from another local Grapha store so a fresh branch can answer queries before a full rebuild.
 - `analyze` emits an immediate graph for one-off inspection.
-- `serve` runs either the HTTP graph explorer or an MCP server over stdio.
+- `serve` runs the HTTP graph explorer.
+- `mcp` runs the MCP server over stdio for AI agents. The old `grapha serve --mcp` form remains accepted for compatibility.
 
 ### Symbol Intelligence
 
@@ -197,7 +199,7 @@ Annotations are local-first notes scoped by project identity, not by branch. Pro
 
 ```bash
 grapha index .
-grapha serve --mcp --watch -p .
+grapha mcp --watch -p .
 ```
 
 Add Grapha to an MCP client:
@@ -207,7 +209,7 @@ Add Grapha to an MCP client:
   "mcpServers": {
     "grapha": {
       "command": "grapha",
-      "args": ["serve", "--mcp", "--watch", "-p", "."]
+      "args": ["mcp", "--watch", "-p", "."]
     }
   }
 }

@@ -44,7 +44,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
     version,
     about = "Fast code intelligence CLI and MCP server for Swift, Rust, and tree-sitter languages",
     long_about = "Grapha indexes source into a symbol graph for search, context, impact analysis, dataflow tracing, repository health checks, and MCP-based agent workflows.\n\nSwift uses Xcode index stores when available, then falls back through SwiftSyntax and tree-sitter. Rust and other supported languages use tree-sitter extraction with name-based relationships.",
-    after_help = "Typical workflow:\n  grapha index .\n  grapha repo status\n  grapha symbol search ViewModel --context\n  grapha symbol impact GiftPanelViewModel --format tree\n  grapha serve --mcp --watch\n\nUse `grapha <command> --help` for task-specific examples."
+    after_help = "Typical workflow:\n  grapha index .\n  grapha repo status\n  grapha symbol search ViewModel --context\n  grapha symbol impact GiftPanelViewModel --format tree\n  grapha mcp --watch\n\nUse `grapha <command> --help` for task-specific examples."
 )]
 struct Cli {
     /// Show progress, timing, and other diagnostic logs
@@ -235,10 +235,10 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Launch web UI for interactive graph exploration
+    /// Launch the HTTP graph explorer
     #[command(
-        long_about = "Serve an indexed project either as an HTTP graph explorer or as a JSON-RPC MCP server over stdio for AI agents. Use --watch to keep the graph fresh while files change.",
-        after_help = "Examples:\n  grapha index .\n  grapha serve --port 8080\n  grapha serve --mcp --watch -p ."
+        long_about = "Serve an indexed project as an HTTP graph explorer.",
+        after_help = "Examples:\n  grapha index .\n  grapha serve --port 8080"
     )]
     Serve {
         /// Project directory
@@ -250,9 +250,22 @@ enum Commands {
         /// Port to listen on. Defaults to [serve].port or 8080.
         #[arg(long)]
         port: Option<u16>,
-        /// Run as MCP server over stdio (instead of HTTP)
-        #[arg(long)]
+        /// Deprecated compatibility alias for `grapha mcp`
+        #[arg(long, hide = true)]
         mcp: bool,
+        /// Deprecated compatibility alias for `grapha mcp --watch`
+        #[arg(long, hide = true, default_missing_value = "true", num_args = 0..=1, require_equals = true)]
+        watch: Option<bool>,
+    },
+    /// Run the MCP server over stdio for AI agents
+    #[command(
+        long_about = "Run an indexed project as a JSON-RPC MCP server over stdio for AI agents. Use --watch to keep the graph fresh while files change.",
+        after_help = "Examples:\n  grapha index .\n  grapha mcp --watch\n  grapha mcp --watch -p ."
+    )]
+    Mcp {
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
         /// Watch for file changes and auto-update the graph. Defaults to [serve].watch or false.
         #[arg(long, default_missing_value = "true", num_args = 0..=1, require_equals = true)]
         watch: Option<bool>,
@@ -955,7 +968,14 @@ fn main() -> anyhow::Result<()> {
             port,
             mcp,
             watch,
-        } => app::serve::handle_serve(path, host, port, mcp, watch, verbose)?,
+        } => {
+            if mcp {
+                app::mcp::handle_mcp(path, watch, verbose)?
+            } else {
+                app::serve::handle_serve(path, host, port, verbose)?
+            }
+        }
+        Commands::Mcp { path, watch } => app::mcp::handle_mcp(path, watch, verbose)?,
         Commands::Annotation { command } => {
             app::annotation::handle_annotation_command(command, verbose)?
         }

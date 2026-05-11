@@ -830,8 +830,12 @@ fn cli_smoke_matrix_help_contracts() {
             "Run repository-scoped analysis over the indexed graph",
         ),
         (
-            vec!["serve", "--mcp", "--help"],
-            "Serve an indexed project either as an HTTP graph explorer",
+            vec!["serve", "--help"],
+            "Serve an indexed project as an HTTP graph explorer",
+        ),
+        (
+            vec!["mcp", "--help"],
+            "Run an indexed project as a JSON-RPC MCP server over stdio",
         ),
     ];
 
@@ -854,7 +858,7 @@ fn rich_help_examples_are_rendered() {
             "Grapha indexes source into a symbol graph",
         ))
         .stdout(predicate::str::contains("Typical workflow:"))
-        .stdout(predicate::str::contains("grapha serve --mcp --watch"));
+        .stdout(predicate::str::contains("grapha mcp --watch"));
 
     grapha()
         .args(["index", "--help"])
@@ -894,15 +898,26 @@ fn rich_help_examples_are_rendered() {
 }
 
 #[test]
-fn serve_mcp_help_mentions_stdio_contract() {
+fn mcp_help_mentions_stdio_contract() {
+    grapha()
+        .args(["mcp", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Run an indexed project as a JSON-RPC MCP server over stdio",
+        ))
+        .stdout(predicate::str::contains("--watch"));
+}
+
+#[test]
+fn legacy_serve_mcp_flag_remains_accepted() {
     grapha()
         .args(["serve", "--mcp", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Run as MCP server over stdio (instead of HTTP)",
-        ))
-        .stdout(predicate::str::contains("--mcp"));
+            "Serve an indexed project as an HTTP graph explorer",
+        ));
 }
 
 #[test]
