@@ -329,6 +329,33 @@ pub struct StandaloneAnnotationListParams {
     pub project_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct ProjectChannelParams {
+    pub channel: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ProjectSearchParams {
+    #[serde(default)]
+    pub q: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    pub channel: Option<String>,
+    pub kind: Option<String>,
+    pub module: Option<String>,
+    pub repo: Option<String>,
+    pub file: Option<String>,
+    pub role: Option<String>,
+    #[serde(default)]
+    pub fuzzy: bool,
+    #[serde(default)]
+    pub exact_name: bool,
+    #[serde(default)]
+    pub declarations_only: bool,
+    #[serde(default)]
+    pub public_only: bool,
+}
+
 fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
     (
         status,
@@ -443,6 +470,13 @@ fn request_project_id(
 fn non_empty(value: &str) -> Option<&str> {
     let value = value.trim();
     (!value.is_empty()).then_some(value)
+}
+
+fn requested_channel(channel: Option<&str>) -> String {
+    channel
+        .and_then(non_empty)
+        .unwrap_or(crate::remote::DEFAULT_CHANNEL)
+        .to_string()
 }
 
 pub async fn list_standalone_annotations(
@@ -578,6 +612,163 @@ pub async fn sync_standalone_annotations(
     .into_response()
 }
 
+pub async fn publish_project_revision(
+    State(state): State<Arc<AnnotationServiceState>>,
+    Path(project_id): Path<String>,
+    Json(bundle): Json<crate::remote::ProjectIndexBundle>,
+) -> Response {
+    let decoded_project_id = urlencoding::decode(&project_id).unwrap_or_default();
+    if decoded_project_id != bundle.metadata.project_id {
+        state.log.event(format!(
+            "project publish rejected path_project_id={decoded_project_id} bundle_project_id={} error=\"project_id mismatch\"",
+            bundle.metadata.project_id
+        ));
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "path project_id does not match bundle",
+        );
+    }
+
+    if let Err(error) = crate::remote::validate_bundle(&bundle) {
+        state.log.event(format!(
+            "project publish rejected project_id={} channel={} error=\"{error}\"",
+            bundle.metadata.project_id, bundle.metadata.channel
+        ));
+        return error_response(StatusCode::BAD_REQUEST, error.to_string());
+    }
+
+    let store = crate::remote::ProjectRevisionStore::new(state.data_root.clone());
+    match store.publish(&bundle) {
+        Ok(summary) => {
+            state.log.event(format!(
+                "project publish completed project_id={} channel={} nodes={} edges={}",
+                summary.metadata.project_id,
+                summary.metadata.channel,
+                summary.node_count,
+                summary.edge_count
+            ));
+            Json(serde_json::json!({
+                "revision": summary,
+                "policy": crate::remote::channel_policy(&bundle.metadata.channel)
+            }))
+            .into_response()
+        }
+        Err(error) => {
+            state.log.event(format!(
+                "project publish failed project_id={} channel={} error=\"{error}\"",
+                bundle.metadata.project_id, bundle.metadata.channel
+            ));
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to store project revision: {error}"),
+            )
+        }
+    }
+}
+
+pub async fn get_project_revision(
+    State(state): State<Arc<AnnotationServiceState>>,
+    Path(project_id): Path<String>,
+    Query(params): Query<ProjectChannelParams>,
+) -> Response {
+    let decoded_project_id = urlencoding::decode(&project_id).unwrap_or_default();
+    let channel = requested_channel(params.channel.as_deref());
+    let store = crate::remote::ProjectRevisionStore::new(state.data_root.clone());
+    match store.load_bundle(&decoded_project_id, &channel) {
+        Ok(bundle) => Json(bundle).into_response(),
+        Err(error) => error_response(
+            StatusCode::NOT_FOUND,
+            format!("project revision not found: {error}"),
+        ),
+    }
+}
+
+pub async fn get_project_graph(
+    State(state): State<Arc<AnnotationServiceState>>,
+    Path(project_id): Path<String>,
+    Query(params): Query<ProjectChannelParams>,
+) -> Response {
+    let decoded_project_id = urlencoding::decode(&project_id).unwrap_or_default();
+    let channel = requested_channel(params.channel.as_deref());
+    let store = crate::remote::ProjectRevisionStore::new(state.data_root.clone());
+    match store.load_bundle(&decoded_project_id, &channel) {
+        Ok(bundle) => Json(serde_json::json!({
+            "metadata": bundle.metadata,
+            "graph": bundle.graph,
+        }))
+        .into_response(),
+        Err(error) => error_response(
+            StatusCode::NOT_FOUND,
+            format!("project graph not found: {error}"),
+        ),
+    }
+}
+
+pub async fn get_project_status(
+    State(state): State<Arc<AnnotationServiceState>>,
+    Path(project_id): Path<String>,
+    Query(params): Query<ProjectChannelParams>,
+) -> Response {
+    let decoded_project_id = urlencoding::decode(&project_id).unwrap_or_default();
+    let channel = requested_channel(params.channel.as_deref());
+    let store = crate::remote::ProjectRevisionStore::new(state.data_root.clone());
+    match store.summary(&decoded_project_id, &channel) {
+        Ok(summary) => Json(serde_json::json!({
+            "revision": summary,
+            "policy": crate::remote::channel_policy(&channel)
+        }))
+        .into_response(),
+        Err(error) => error_response(
+            StatusCode::NOT_FOUND,
+            format!("project status not found: {error}"),
+        ),
+    }
+}
+
+pub async fn get_project_search(
+    State(state): State<Arc<AnnotationServiceState>>,
+    Path(project_id): Path<String>,
+    Query(params): Query<ProjectSearchParams>,
+) -> Json<serde_json::Value> {
+    let decoded_project_id = urlencoding::decode(&project_id).unwrap_or_default();
+    let channel = requested_channel(params.channel.as_deref());
+    let store = crate::remote::ProjectRevisionStore::new(state.data_root.clone());
+    let bundle = match store.load_bundle(&decoded_project_id, &channel) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            return Json(serde_json::json!({
+                "error": format!("project revision not found: {error}")
+            }));
+        }
+    };
+    let index = match store.open_search_index(&decoded_project_id, &channel) {
+        Ok(index) => index,
+        Err(error) => {
+            return Json(serde_json::json!({
+                "error": format!("project search index not found: {error}")
+            }));
+        }
+    };
+    let options = crate::search::SearchOptions {
+        kind: params.kind,
+        module: params.module,
+        repo: params.repo,
+        file_glob: params.file,
+        role: params.role,
+        fuzzy: params.fuzzy,
+        exact_name: params.exact_name,
+        declarations_only: params.declarations_only,
+        public_only: params.public_only,
+    };
+    let results = crate::search::search_filtered(&index, &params.q, params.limit, &options)
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "results": results,
+        "total": results.len(),
+        "baseline": bundle.metadata,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +860,46 @@ mod tests {
             created_at: "1".to_string(),
             updated_at: "2".to_string(),
             symbol_fingerprint: None,
+        }
+    }
+
+    fn project_bundle(project_id: &str, channel: &str) -> crate::remote::ProjectIndexBundle {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![Node {
+                id: "src/lib.rs::GiftBanner".into(),
+                kind: NodeKind::Struct,
+                name: "GiftBanner".into(),
+                file: "src/lib.rs".into(),
+                span: Span {
+                    start: [1, 0],
+                    end: [3, 1],
+                },
+                visibility: Visibility::Public,
+                metadata: HashMap::new(),
+                role: None,
+                signature: Some("pub struct GiftBanner".into()),
+                doc_comment: None,
+                module: Some("FrameUI".into()),
+                snippet: None,
+                repo: Some("FrameUI".into()),
+            }],
+            edges: Vec::new(),
+        };
+        crate::remote::ProjectIndexBundle {
+            metadata: crate::remote::ProjectRevisionMetadata {
+                project_id: project_id.to_string(),
+                repo_name: "FrameUI".to_string(),
+                channel: channel.to_string(),
+                head_oid: Some("1234567890abcdef".to_string()),
+                head_ref: Some("main".to_string()),
+                config_fingerprint: "{}".to_string(),
+                graph_version: graph.version.clone(),
+                grapha_version: "0.0.0-test".to_string(),
+                bundle_schema_version: crate::remote::PUBLISH_BUNDLE_SCHEMA_VERSION,
+                published_at_unix_secs: 1,
+            },
+            graph,
         }
     }
 
@@ -769,6 +1000,60 @@ mod tests {
         let response = list_standalone_annotations(
             State(state),
             Query(StandaloneAnnotationListParams { project_id: None }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn standalone_project_publish_stores_searchable_revision() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(AnnotationServiceState {
+            data_root: dir.path().to_path_buf(),
+            log: crate::serve::AnnotationServiceLog::disabled(),
+        });
+        let bundle = project_bundle("remote-frameui", "default");
+
+        let response = publish_project_revision(
+            State(state.clone()),
+            Path("remote-frameui".to_string()),
+            Json(bundle),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let store = crate::remote::ProjectRevisionStore::new(dir.path().to_path_buf());
+        let summary = store.summary("remote-frameui", "default").unwrap();
+        let index = store
+            .open_search_index("remote-frameui", "default")
+            .unwrap();
+        let results = crate::search::search_filtered(
+            &index,
+            "GiftBanner",
+            10,
+            &crate::search::SearchOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(summary.metadata.head_ref.as_deref(), Some("main"));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "GiftBanner");
+    }
+
+    #[tokio::test]
+    async fn standalone_project_publish_rejects_incompatible_schema() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(AnnotationServiceState {
+            data_root: dir.path().to_path_buf(),
+            log: crate::serve::AnnotationServiceLog::disabled(),
+        });
+        let mut bundle = project_bundle("remote-frameui", "default");
+        bundle.metadata.bundle_schema_version = crate::remote::PUBLISH_BUNDLE_SCHEMA_VERSION + 1;
+
+        let response = publish_project_revision(
+            State(state),
+            Path("remote-frameui".to_string()),
+            Json(bundle),
         )
         .await;
 

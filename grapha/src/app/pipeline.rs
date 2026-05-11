@@ -5,8 +5,10 @@ use std::time::Instant;
 use anyhow::Context;
 use grapha_core::Classifier;
 
+use crate::store::Store;
 use crate::{
-    cache, classify, compress, config, filter, polyglot_plugin, progress, rust_plugin, snippet,
+    cache, classify, compress, config, filter, http_client, polyglot_plugin, progress, remote,
+    rust_plugin, snippet, store,
 };
 
 pub(crate) struct PipelineOutput {
@@ -30,19 +32,11 @@ struct IndexedInputFile {
     context: grapha_core::ProjectContext,
 }
 
-fn default_repo_name(path: &Path) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("local")
-        .to_string()
-}
-
 fn primary_repo_name(path: &Path, cfg: &config::GraphaConfig) -> String {
     cfg.repo
         .name
         .clone()
-        .unwrap_or_else(|| default_repo_name(path))
+        .unwrap_or_else(|| crate::data_paths::repo_name_for_project_root(path))
 }
 
 fn extraction_cache_key(repo_name: &str, path: &Path) -> String {
@@ -72,10 +66,39 @@ fn repo_scoped_id(repo_name: &str, id: &str) -> String {
     format!("{repo_name}::{id}")
 }
 
+#[derive(Debug, Clone)]
+struct EvidenceMetadata {
+    source: &'static str,
+    channel: Option<String>,
+    head_oid: Option<String>,
+    head_ref: Option<String>,
+}
+
+impl EvidenceMetadata {
+    fn local_precise() -> Self {
+        Self {
+            source: "local_precise",
+            channel: None,
+            head_oid: None,
+            head_ref: None,
+        }
+    }
+
+    fn remote_baseline(metadata: &remote::ProjectRevisionMetadata) -> Self {
+        Self {
+            source: "remote_baseline",
+            channel: Some(metadata.channel.clone()),
+            head_oid: metadata.head_oid.clone(),
+            head_ref: metadata.head_ref.clone(),
+        }
+    }
+}
+
 fn stamp_repo(
     mut result: grapha_core::ExtractionResult,
     repo_name: &str,
     namespace_ids: bool,
+    evidence: &EvidenceMetadata,
 ) -> grapha_core::ExtractionResult {
     let repo = repo_name.to_string();
     let id_map = namespace_ids.then(|| {
@@ -93,6 +116,22 @@ fn stamp_repo(
             node.id = scoped_id.clone();
         }
         node.repo = Some(repo.clone());
+        node.metadata.insert(
+            "grapha.evidence.source".to_string(),
+            evidence.source.to_string(),
+        );
+        if let Some(channel) = &evidence.channel {
+            node.metadata
+                .insert("grapha.evidence.channel".to_string(), channel.clone());
+        }
+        if let Some(head_oid) = &evidence.head_oid {
+            node.metadata
+                .insert("grapha.evidence.head_oid".to_string(), head_oid.clone());
+        }
+        if let Some(head_ref) = &evidence.head_ref {
+            node.metadata
+                .insert("grapha.evidence.head_ref".to_string(), head_ref.clone());
+        }
     }
     for edge in &mut result.edges {
         if let Some(id_map) = &id_map {
@@ -111,6 +150,111 @@ fn stamp_repo(
         edge.repo = Some(repo.clone());
     }
     result
+}
+
+fn graph_to_extraction_result(graph: grapha_core::graph::Graph) -> grapha_core::ExtractionResult {
+    grapha_core::ExtractionResult {
+        nodes: graph.nodes,
+        edges: graph.edges,
+        imports: Vec::new(),
+    }
+}
+
+fn load_graph_from_store_dir(store_dir: &Path) -> anyhow::Result<grapha_core::graph::Graph> {
+    let sqlite_path = store_dir.join("grapha.db");
+    if sqlite_path.exists() {
+        return store::sqlite::SqliteStore::new(sqlite_path).load();
+    }
+    let json_path = store_dir.join("graph.json");
+    if json_path.exists() {
+        return store::json::JsonStore::new(json_path).load();
+    }
+    anyhow::bail!("no Grapha store found at {}", store_dir.display())
+}
+
+fn candidate_external_store_dirs(ext: &config::ExternalRepo) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(index_path) = ext.index_path.as_deref().and_then(non_empty) {
+        let path = PathBuf::from(index_path);
+        dirs.push(if is_store_dir(&path) {
+            path
+        } else {
+            path.join(".grapha")
+        });
+    }
+    if let Some(path) = ext.path.as_deref().and_then(non_empty) {
+        let path = PathBuf::from(path);
+        dirs.push(if is_store_dir(&path) {
+            path
+        } else {
+            path.join(".grapha")
+        });
+    }
+    dirs
+}
+
+fn is_store_dir(path: &Path) -> bool {
+    path.join("grapha.db").exists() || path.join("graph.json").exists()
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn load_external_index_result(
+    ext: &config::ExternalRepo,
+) -> anyhow::Result<Option<grapha_core::ExtractionResult>> {
+    for store_dir in candidate_external_store_dirs(ext) {
+        if !is_store_dir(&store_dir) {
+            continue;
+        }
+        let graph = load_graph_from_store_dir(&store_dir)?;
+        let result = stamp_repo(
+            graph_to_extraction_result(graph),
+            &ext.name,
+            true,
+            &EvidenceMetadata::local_precise(),
+        );
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+fn load_external_remote_result(
+    ext: &config::ExternalRepo,
+) -> anyhow::Result<Option<grapha_core::ExtractionResult>> {
+    let Some(remote_cfg) = ext.remote.as_ref() else {
+        return Ok(None);
+    };
+    let channel = non_empty(&remote_cfg.channel).unwrap_or(remote::DEFAULT_CHANNEL);
+    let bundle = if let Some(server) = remote_cfg.server.as_deref().and_then(non_empty) {
+        let endpoint = http_client::HttpEndpoint::parse(server)?;
+        let project_id = urlencoding::encode(&remote_cfg.project_id);
+        let channel = urlencoding::encode(channel);
+        http_client::get_json(
+            &endpoint,
+            &format!("/api/projects/{project_id}/revision?channel={channel}"),
+        )?
+    } else {
+        remote::ProjectRevisionStore::new(crate::data_paths::global_data_root())
+            .load_bundle(&remote_cfg.project_id, channel)?
+    };
+    let evidence = EvidenceMetadata::remote_baseline(&bundle.metadata);
+    Ok(Some(stamp_repo(
+        graph_to_extraction_result(bundle.graph),
+        &ext.name,
+        true,
+        &evidence,
+    )))
+}
+
+fn external_source_path(ext: &config::ExternalRepo) -> Option<PathBuf> {
+    ext.path
+        .as_deref()
+        .and_then(non_empty)
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
 }
 
 fn apply_config_classifier_semantics(
@@ -178,20 +322,53 @@ pub(crate) fn run_pipeline(
         .collect();
     let primary_file_count = indexed_files.len();
     let mut external_repo_count = 0usize;
+    let mut external_seed_results = Vec::new();
+    let mut external_source_contexts = Vec::new();
     for ext in &cfg.external {
-        let ext_path = Path::new(&ext.path);
-        if !ext_path.exists() {
-            if verbose {
+        match load_external_index_result(ext) {
+            Ok(Some(result)) => {
+                external_seed_results.push(result);
+                external_repo_count += 1;
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) if verbose => {
                 eprintln!(
-                    "  \x1b[33m!\x1b[0m external repo '{}' not found at {}, skipping",
-                    ext.name, ext.path
+                    "  \x1b[33m!\x1b[0m failed to load external index for '{}': {error}",
+                    ext.name
                 );
             }
-            continue;
+            Err(_) => {}
         }
-        let mut ext_context = grapha_core::project_context(ext_path);
+
+        let Some(ext_path) = external_source_path(ext) else {
+            match load_external_remote_result(ext) {
+                Ok(Some(result)) => {
+                    external_seed_results.push(result);
+                    external_repo_count += 1;
+                }
+                Ok(None) => {
+                    if verbose {
+                        eprintln!(
+                            "  \x1b[33m!\x1b[0m external repo '{}' has no available local or remote evidence, skipping",
+                            ext.name
+                        );
+                    }
+                }
+                Err(error) if verbose => {
+                    eprintln!(
+                        "  \x1b[33m!\x1b[0m failed to load remote baseline for '{}': {error}",
+                        ext.name
+                    );
+                }
+                Err(_) => {}
+            }
+            continue;
+        };
+
+        let mut ext_context = grapha_core::project_context(&ext_path);
         ext_context.index_store_enabled = cfg.swift.index_store;
-        match grapha_core::pipeline::discover_files(ext_path, &registry) {
+        match grapha_core::pipeline::discover_files(&ext_path, &registry) {
             Ok(ext_discovered) => {
                 indexed_files.extend(ext_discovered.into_iter().map(|file| IndexedInputFile {
                     path: file,
@@ -199,6 +376,7 @@ pub(crate) fn run_pipeline(
                     context: ext_context.clone(),
                 }));
                 external_repo_count += 1;
+                external_source_contexts.push(ext_context);
             }
             Err(e) => {
                 if verbose {
@@ -229,13 +407,7 @@ pub(crate) fn run_pipeline(
     }
 
     let mut module_map = grapha_core::discover_modules(&registry, &project_context)?;
-    for ext in &cfg.external {
-        let ext_path = Path::new(&ext.path);
-        if !ext_path.exists() {
-            continue;
-        }
-        let mut ext_context = grapha_core::project_context(ext_path);
-        ext_context.index_store_enabled = cfg.swift.index_store;
+    for ext_context in &external_source_contexts {
         if !ext_context.index_store_enabled {
             grapha_swift::clear_index_store_path(&ext_context.project_root);
         }
@@ -267,7 +439,7 @@ pub(crate) fn run_pipeline(
     let t_max_single_file_ns = AtomicU64::new(0);
     let extraction_cache_entries = Mutex::new(std::collections::HashMap::new());
 
-    let results: Vec<_> = indexed_files
+    let mut results: Vec<_> = indexed_files
         .par_iter()
         .filter_map(|input| {
             let file = &input.path;
@@ -329,6 +501,7 @@ pub(crate) fn run_pipeline(
                         grapha_core::lower_semantics(document),
                         &input.repo_name,
                         input.repo_name != primary_repo,
+                        &EvidenceMetadata::local_precise(),
                     );
                     let t2 = Instant::now();
                     if result
@@ -382,6 +555,7 @@ pub(crate) fn run_pipeline(
             }
         })
         .collect();
+    results.extend(external_seed_results);
 
     grapha_core::finish_plugins(&registry, &project_context)?;
 
@@ -541,7 +715,12 @@ pub(crate) fn handle_analyze(
 
 #[cfg(test)]
 mod tests {
-    use super::{run_pipeline, stamp_repo};
+    use super::{
+        EvidenceMetadata, graph_to_extraction_result, load_external_index_result, run_pipeline,
+        stamp_repo,
+    };
+    use crate::store::Store;
+    use crate::{config, remote};
     use grapha_core::ExtractionResult;
     use grapha_core::graph::{
         Edge, EdgeKind, EdgeProvenance, FlowDirection, Node, NodeKind, NodeRole, Span,
@@ -578,6 +757,31 @@ mod tests {
         }
     }
 
+    fn test_graph_with_node(id: &str, name: &str) -> grapha_core::graph::Graph {
+        grapha_core::graph::Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![Node {
+                id: id.to_string(),
+                kind: NodeKind::Struct,
+                name: name.to_string(),
+                file: "src/lib.rs".into(),
+                span: Span {
+                    start: [1, 0],
+                    end: [1, 10],
+                },
+                visibility: Visibility::Public,
+                metadata: Default::default(),
+                role: None,
+                signature: None,
+                doc_comment: None,
+                module: Some("FrameUI".to_string()),
+                snippet: None,
+                repo: None,
+            }],
+            edges: Vec::new(),
+        }
+    }
+
     #[test]
     fn stamp_repo_namespaces_external_ids_and_edges() {
         let result = ExtractionResult {
@@ -607,16 +811,142 @@ mod tests {
             imports: Vec::new(),
         };
 
-        let stamped = stamp_repo(result, "shared", true);
+        let stamped = stamp_repo(result, "shared", true, &EvidenceMetadata::local_precise());
 
         assert_eq!(stamped.nodes[0].id, "shared::src/main.rs::load");
         assert_eq!(stamped.nodes[0].repo.as_deref(), Some("shared"));
+        assert_eq!(
+            stamped.nodes[0]
+                .metadata
+                .get("grapha.evidence.source")
+                .map(String::as_str),
+            Some("local_precise")
+        );
         assert_eq!(stamped.edges[0].source, "shared::src/main.rs::load");
         assert_eq!(stamped.edges[0].target, "shared::src/main.rs::save");
         assert_eq!(stamped.edges[0].repo.as_deref(), Some("shared"));
         assert_eq!(
             stamped.edges[0].provenance[0].symbol_id,
             "shared::src/main.rs::load"
+        );
+    }
+
+    #[test]
+    fn external_index_result_keeps_repo_namespace_and_local_evidence() {
+        let dir = TempDir::new().unwrap();
+        let store_dir = dir.path().join(".grapha");
+        fs::create_dir_all(&store_dir).unwrap();
+        crate::store::json::JsonStore::new(store_dir.join("graph.json"))
+            .save(&test_graph_with_node(
+                "src/lib.rs::GiftBanner",
+                "GiftBanner",
+            ))
+            .unwrap();
+        let external = config::ExternalRepo {
+            name: "FrameUI".to_string(),
+            path: None,
+            index_path: Some(store_dir.to_string_lossy().to_string()),
+            remote: None,
+        };
+
+        let result = load_external_index_result(&external).unwrap().unwrap();
+
+        assert_eq!(result.nodes[0].id, "FrameUI::src/lib.rs::GiftBanner");
+        assert_eq!(result.nodes[0].repo.as_deref(), Some("FrameUI"));
+        assert_eq!(
+            result.nodes[0]
+                .metadata
+                .get("grapha.evidence.source")
+                .map(String::as_str),
+            Some("local_precise")
+        );
+    }
+
+    #[test]
+    fn remote_baseline_stamp_keeps_repo_namespace_and_head_metadata() {
+        let graph = test_graph_with_node("src/lib.rs::GiftBanner", "GiftBanner");
+        let metadata = remote::ProjectRevisionMetadata {
+            project_id: "remote-frameui".to_string(),
+            repo_name: "FrameUI".to_string(),
+            channel: "default".to_string(),
+            head_oid: Some("1234567890abcdef".to_string()),
+            head_ref: Some("main".to_string()),
+            config_fingerprint: "{}".to_string(),
+            graph_version: graph.version.clone(),
+            grapha_version: "0.0.0-test".to_string(),
+            bundle_schema_version: remote::PUBLISH_BUNDLE_SCHEMA_VERSION,
+            published_at_unix_secs: 1,
+        };
+        let evidence = EvidenceMetadata::remote_baseline(&metadata);
+
+        let result = stamp_repo(
+            graph_to_extraction_result(graph),
+            "FrameUI",
+            true,
+            &evidence,
+        );
+
+        assert_eq!(result.nodes[0].id, "FrameUI::src/lib.rs::GiftBanner");
+        assert_eq!(
+            result.nodes[0]
+                .metadata
+                .get("grapha.evidence.source")
+                .map(String::as_str),
+            Some("remote_baseline")
+        );
+        assert_eq!(
+            result.nodes[0]
+                .metadata
+                .get("grapha.evidence.head_ref")
+                .map(String::as_str),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn run_pipeline_prefers_local_external_source_over_remote_baseline() {
+        let project_dir = TempDir::new().unwrap();
+        let app_root = project_dir.path().join("app");
+        let external_root = project_dir.path().join("frameui");
+        write_rust_project(
+            &external_root,
+            "",
+            r#"
+pub struct GiftBanner;
+"#,
+        );
+        write_rust_project(
+            &app_root,
+            &format!(
+                r#"
+[[external]]
+name = "FrameUI"
+path = "{}"
+
+[external.remote]
+project_id = "missing-remote-frameui"
+"#,
+                external_root.display()
+            ),
+            r#"
+fn main() {}
+"#,
+        );
+
+        let output = run_pipeline(&app_root, false, false, None).unwrap();
+        let node = output
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.name == "GiftBanner")
+            .expect("expected external source symbol");
+
+        assert_eq!(node.repo.as_deref(), Some("FrameUI"));
+        assert_eq!(
+            node.metadata
+                .get("grapha.evidence.source")
+                .map(String::as_str),
+            Some("local_precise")
         );
     }
 

@@ -75,8 +75,18 @@ pub fn project_identity(project_root: &Path) -> ProjectIdentity {
 
 pub fn repo_id_for_project_root(project_root: &Path) -> String {
     let config = crate::config::load_config(project_root);
+    if let Some(project_id) = config
+        .repo
+        .project_id
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .filter(|project_id| is_valid_project_id(project_id))
+    {
+        return project_id.to_string();
+    }
+
     if let Some(name) = config.repo.name.as_deref().and_then(non_empty_trimmed) {
-        return repo_id_from_configured_name(name);
+        return repo_id_from_configured_name(name, &identity_source_for_project_root(project_root));
     }
 
     if let Ok(repo) = Repository::discover(project_root) {
@@ -90,6 +100,17 @@ pub fn repo_id_for_project_root(project_root: &Path) -> String {
 
     let project_path = normalize_path_for_identity(project_root);
     format!("path-{}", hash_hex(project_path.to_string_lossy().as_ref()))
+}
+
+pub fn repo_name_for_project_root(project_root: &Path) -> String {
+    let config = crate::config::load_config(project_root);
+    config
+        .repo
+        .name
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default_repo_name(project_root))
 }
 
 fn global_data_root_from_env<E, H, P>(mut env_var: E, home_dir: H, platform: P) -> PathBuf
@@ -176,9 +197,26 @@ fn primary_remote_url(repo: &Repository) -> Option<String> {
         .and_then(|url| non_empty_trimmed(&url).map(ToOwned::to_owned))
 }
 
-fn repo_id_from_configured_name(name: &str) -> String {
+fn identity_source_for_project_root(project_root: &Path) -> String {
+    if let Ok(repo) = Repository::discover(project_root) {
+        if let Some(remote_url) = primary_remote_url(&repo) {
+            return format!("remote:{}", normalize_remote_url(&remote_url));
+        }
+        return format!(
+            "git:{}",
+            normalize_path_for_identity(repo.commondir()).to_string_lossy()
+        );
+    }
+
+    format!(
+        "path:{}",
+        normalize_path_for_identity(project_root).to_string_lossy()
+    )
+}
+
+fn repo_id_from_configured_name(name: &str, source: &str) -> String {
     let slug = slugify(name);
-    format!("name-{slug}-{}", short_hash_hex(name))
+    format!("name-{slug}-{}", short_hash_hex(source))
 }
 
 fn repo_id_from_remote_url(url: &str) -> String {
@@ -231,6 +269,31 @@ fn normalize_path_for_identity(path: &Path) -> PathBuf {
 fn non_empty_trimmed(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then_some(trimmed)
+}
+
+pub fn validate_project_id(project_id: &str) -> anyhow::Result<&str> {
+    let project_id = project_id.trim();
+    if project_id.is_empty() {
+        anyhow::bail!("project_id cannot be empty");
+    }
+    if !is_valid_project_id(project_id) {
+        anyhow::bail!("project_id contains unsupported characters");
+    }
+    Ok(project_id)
+}
+
+fn is_valid_project_id(project_id: &str) -> bool {
+    project_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn default_repo_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("local")
+        .to_string()
 }
 
 fn slugify(value: &str) -> String {
@@ -307,6 +370,31 @@ mod tests {
         let repo_id = repo_id_for_project_root(dir.path());
 
         assert!(repo_id.starts_with("name-Frame-UI-"));
+    }
+
+    #[test]
+    fn configured_project_id_is_canonical_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("grapha.toml"),
+            "[repo]\nname = \"Frame UI\"\nproject_id = \"frame-ui-prod\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(repo_id_for_project_root(dir.path()), "frame-ui-prod");
+    }
+
+    #[test]
+    fn configured_repo_name_collisions_keep_distinct_project_ids() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        std::fs::write(left.path().join("grapha.toml"), "[repo]\nname = \"App\"\n").unwrap();
+        std::fs::write(right.path().join("grapha.toml"), "[repo]\nname = \"App\"\n").unwrap();
+
+        assert_ne!(
+            repo_id_for_project_root(left.path()),
+            repo_id_for_project_root(right.path())
+        );
     }
 
     #[test]

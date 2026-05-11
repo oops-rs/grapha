@@ -15,6 +15,7 @@ mod extract;
 mod fields;
 mod filter;
 mod history;
+mod http_client;
 mod index_status;
 mod inferred;
 mod localization;
@@ -25,6 +26,7 @@ mod polyglot_plugin;
 mod progress;
 mod query;
 mod recall;
+mod remote;
 mod render;
 mod rust_plugin;
 mod search;
@@ -234,6 +236,22 @@ enum Commands {
         /// Replace an existing non-temporary target Grapha index
         #[arg(long)]
         force: bool,
+    },
+    /// Publish the current local index to a remote Grapha service
+    #[command(
+        long_about = "Upload the current local graph index as a project revision bundle. CI should run `grapha index .` first, then publish the resulting graph to the shared Grapha service.",
+        after_help = "Examples:\n  grapha index .\n  grapha publish --server http://HOST:8080 --channel default"
+    )]
+    Publish {
+        /// Project directory whose .grapha store should be published
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        /// Remote Grapha service base URL, e.g. http://HOST:8080
+        #[arg(long)]
+        server: String,
+        /// Channel to promote after upload. `default` and `release/*` are durable.
+        #[arg(long, default_value = remote::DEFAULT_CHANNEL)]
+        channel: String,
     },
     /// Launch the HTTP graph explorer
     #[command(
@@ -962,6 +980,11 @@ fn main() -> anyhow::Result<()> {
             timing,
         } => app::index::handle_index(path, format, store_dir, full_rebuild, timing)?,
         Commands::Migrate { path, from, force } => app::migrate::handle_migrate(path, from, force)?,
+        Commands::Publish {
+            path,
+            server,
+            channel,
+        } => app::publish::handle_publish(path, server, channel)?,
         Commands::Serve {
             path,
             host,

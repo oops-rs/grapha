@@ -196,7 +196,7 @@ impl AnnotationStore {
         project_id: &str,
         data_root: &Path,
     ) -> anyhow::Result<Self> {
-        let project_id = validate_project_id(project_id)?;
+        let project_id = crate::data_paths::validate_project_id(project_id)?;
         Ok(Self {
             path: data_root
                 .join("repos")
@@ -584,20 +584,6 @@ fn record_key(project_id: &str, branch: &str, repo: &str, symbol_key: &str) -> A
         repo.to_string(),
         symbol_key.to_string(),
     )
-}
-
-fn validate_project_id(project_id: &str) -> anyhow::Result<&str> {
-    let project_id = project_id.trim();
-    if project_id.is_empty() {
-        anyhow::bail!("project_id cannot be empty");
-    }
-    if !project_id
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        anyhow::bail!("project_id contains unsupported characters");
-    }
-    Ok(project_id)
 }
 
 fn create_tables(conn: &Connection) -> anyhow::Result<()> {

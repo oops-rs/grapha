@@ -19,6 +19,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_remote_channel() -> String {
+    "default".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct OutputConfig {
     #[serde(default)]
@@ -51,13 +55,29 @@ pub struct ArchitectureDenyRule {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExternalRepo {
     pub name: String,
-    pub path: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub index_path: Option<String>,
+    #[serde(default)]
+    pub remote: Option<ExternalRemoteBaseline>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ExternalRemoteBaseline {
+    pub project_id: String,
+    #[serde(default = "default_remote_channel")]
+    pub channel: String,
+    #[serde(default)]
+    pub server: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RepoConfig {
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -131,6 +151,7 @@ impl GraphaConfig {
         #[derive(Serialize)]
         struct IndexInputFingerprint<'a> {
             repo_name: &'a Option<String>,
+            repo_project_id: &'a Option<String>,
             swift_index_store: bool,
             classifiers: &'a [ClassifierRule],
             external: &'a [ExternalRepo],
@@ -138,6 +159,7 @@ impl GraphaConfig {
 
         serde_json::to_string(&IndexInputFingerprint {
             repo_name: &self.repo.name,
+            repo_project_id: &self.repo.project_id,
             swift_index_store: self.swift.index_store,
             classifiers: &self.classifiers,
             external: &self.external,
@@ -389,15 +411,54 @@ path = "/path/to/framenetwork"
         let config: GraphaConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.external.len(), 2);
         assert_eq!(config.external[0].name, "FrameUI");
-        assert_eq!(config.external[0].path, "/path/to/frameui");
+        assert_eq!(config.external[0].path.as_deref(), Some("/path/to/frameui"));
         assert_eq!(config.external[1].name, "FrameNetwork");
-        assert_eq!(config.external[1].path, "/path/to/framenetwork");
+        assert_eq!(
+            config.external[1].path.as_deref(),
+            Some("/path/to/framenetwork")
+        );
     }
 
     #[test]
     fn external_defaults_empty() {
         let config: GraphaConfig = toml::from_str("").unwrap();
         assert!(config.external.is_empty());
+    }
+
+    #[test]
+    fn parse_external_remote_baseline() {
+        let toml_str = r#"
+[[external]]
+name = "FrameUI"
+index_path = "/indexes/frameui/.grapha"
+
+[external.remote]
+project_id = "remote-frameui"
+server = "http://127.0.0.1:8080"
+"#;
+        let config: GraphaConfig = toml::from_str(toml_str).unwrap();
+        let external = &config.external[0];
+
+        assert_eq!(external.name, "FrameUI");
+        assert_eq!(external.path, None);
+        assert_eq!(
+            external.index_path.as_deref(),
+            Some("/indexes/frameui/.grapha")
+        );
+        assert_eq!(
+            external
+                .remote
+                .as_ref()
+                .map(|remote| remote.project_id.as_str()),
+            Some("remote-frameui")
+        );
+        assert_eq!(
+            external
+                .remote
+                .as_ref()
+                .map(|remote| remote.channel.as_str()),
+            Some("default")
+        );
     }
 
     #[test]
@@ -408,6 +469,17 @@ name = "MobileApp"
 "#;
         let config: GraphaConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.repo.name.as_deref(), Some("MobileApp"));
+    }
+
+    #[test]
+    fn parse_repo_project_id() {
+        let toml_str = r#"
+[repo]
+name = "MobileApp"
+project_id = "mobile-app-prod"
+"#;
+        let config: GraphaConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.repo.project_id.as_deref(), Some("mobile-app-prod"));
     }
 
     #[test]

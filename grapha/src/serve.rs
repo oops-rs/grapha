@@ -119,17 +119,37 @@ pub async fn run_annotation_service(
     ));
     let state = Arc::new(AnnotationServiceState { data_root, log });
     let app = Router::new()
-        .route("/", get(|| async { Html("Grapha annotation service") }))
+        .route("/", get(|| async { Html("Grapha project service") }))
         .route("/api/annotations", get(api::list_standalone_annotations))
         .route(
             "/api/annotations/sync",
             post(api::sync_standalone_annotations),
         )
+        .route(
+            "/api/projects/{project_id}/revisions",
+            post(api::publish_project_revision),
+        )
+        .route(
+            "/api/projects/{project_id}/revision",
+            get(api::get_project_revision),
+        )
+        .route(
+            "/api/projects/{project_id}/graph",
+            get(api::get_project_graph),
+        )
+        .route(
+            "/api/projects/{project_id}/status",
+            get(api::get_project_status),
+        )
+        .route(
+            "/api/projects/{project_id}/search",
+            get(api::get_project_search),
+        )
         .with_state(state)
         .layer(tower_http::cors::CorsLayer::permissive());
 
     eprintln!(
-        "  \x1b[32m✓\x1b[0m annotation service at http://localhost:{port} (log {})",
+        "  \x1b[32m✓\x1b[0m Grapha project service at http://localhost:{port} (log {})",
         log_path.display()
     );
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;

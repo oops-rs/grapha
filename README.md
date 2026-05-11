@@ -77,6 +77,9 @@ grapha concept bind "送礼横幅" --symbol GiftBannerPage --symbol GiftBannerVi
 
 # Serve Grapha to AI agents through MCP
 grapha mcp --watch
+
+# Publish a default-branch baseline from CI
+grapha publish --server http://HOST:8080 --channel default
 ```
 
 ## CLI Guide
@@ -86,6 +89,7 @@ grapha mcp --watch
 ```bash
 grapha index <path> [--format sqlite|json] [--store-dir DIR] [--full-rebuild] [--timing]
 grapha migrate [-p PATH] [--from OTHER_WORKTREE_OR_STORE] [--force]
+grapha publish [-p PATH] --server http://HOST:8080 [--channel default|release/1.0|branch/name]
 grapha analyze <path> [--output FILE] [--compact] [--filter fn,struct]
 grapha serve [-p PATH] [--host HOST] [--port N]
 grapha mcp [-p PATH] [--watch[=true|false]]
@@ -93,9 +97,12 @@ grapha mcp [-p PATH] [--watch[=true|false]]
 
 - `index` is the normal entry point. It stores graph data, search data, localization snapshots, asset snapshots, and freshness metadata under `.grapha/` by default.
 - `migrate` bootstraps a worktree from another local Grapha store so a fresh branch can answer queries before a full rebuild.
+- `publish` uploads the current local index as a remote project revision bundle. CI should run `grapha index .` first; the remote service stores the bundle by `project_id`, rebuilds search, and promotes the requested channel.
 - `analyze` emits an immediate graph for one-off inspection.
 - `serve` runs the HTTP graph explorer.
 - `mcp` runs the MCP server over stdio for AI agents. The old `grapha serve --mcp` form remains accepted for compatibility.
+
+Remote baseline indexing is described in [docs/plans/2026-05-11-remote-baseline-multiproject-indexing.md](docs/plans/2026-05-11-remote-baseline-multiproject-indexing.md). Local indexes remain authoritative for a checkout; remote default-branch indexes are shared fallback evidence.
 
 ### Symbol Intelligence
 
@@ -191,7 +198,7 @@ grapha annotation sync [-p PATH]
 grapha annotation sync --server http://HOST:8080
 ```
 
-Annotations are local-first notes scoped by project identity, not by branch. Project identity comes from `[repo].name`, Git metadata, or the project path fallback. Sync resolves the service address from `--server`, `GRAPHA_ANNOTATION_SERVER`, project `grapha.toml`, then global Grapha config.
+Annotations are local-first notes scoped by project identity, not by branch. Project identity comes from `[repo].project_id`, Git metadata, or the project path fallback; `[repo].name` is the display label and repo namespace. Sync resolves the service address from `--server`, `GRAPHA_ANNOTATION_SERVER`, project `grapha.toml`, then global Grapha config.
 
 `grapha annotation serve` writes operational logs to the Grapha config directory by default, typically `~/.config/grapha/annotation-service.log`. Use `--log-file` to override the path. `--daemon` starts the standalone annotation service in the background and sends stdout/stderr to the same log file.
 
@@ -249,6 +256,7 @@ Project configuration lives in an optional `grapha.toml` at the project root:
 ```toml
 [repo]
 name = "MobileApp"
+project_id = "mobile-app-prod"
 
 [annotations]
 server = "http://192.168.1.10:8080"
@@ -270,6 +278,12 @@ enabled = false
 [[external]]
 name = "FrameUI"
 path = "/path/to/local/frameui"
+index_path = "/path/to/local/frameui/.grapha"
+
+[external.remote]
+project_id = "remote-frameui"
+server = "http://192.168.1.10:8080"
+channel = "default"
 
 [[architecture.layers]]
 name = "ui"
@@ -290,6 +304,8 @@ terminal = "persistence"
 direction = "write"
 operation = "set"
 ```
+
+`project_id` is the canonical project key for remote revisions and annotations. `name` remains the display label, search filter, and namespace used when multiple repos are merged. External dependencies resolve in order from `index_path`, then local `path`, then the configured remote baseline.
 
 Global developer defaults can live in `$GRAPHA_CONFIG`, `$XDG_CONFIG_HOME/grapha/config.toml`, `~/.config/grapha/config.toml`, or `~/.grapha/config.toml`. Project config overrides global config for repository-specific values such as `[annotations].server` and `[serve].port`.
 
