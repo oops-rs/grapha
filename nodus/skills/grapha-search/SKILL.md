@@ -12,6 +12,7 @@ description: "Use when work in this repo needs to find symbols, read callers/cal
 | Find symbols by name / kind / file / role | `mcp__grapha__search_symbols` | `grapha symbol search "<query>" --context` |
 | 360° context: callers, callees, impls, annotations | `mcp__grapha__get_symbol_context` | `grapha symbol context <symbol>` |
 | Many contexts in one shot | `mcp__grapha__batch_context` | (loop CLI calls) |
+| Public/API-like surface of a type | `mcp__grapha__get_api_surface` | `grapha symbol api <type>` |
 | List symbols inside a file | `mcp__grapha__get_file_symbols` | `grapha symbol search --file <path>` |
 | List symbols for many known files | `mcp__grapha__batch_file_symbols` | `grapha symbol files <path>...` |
 | File / module layout | `mcp__grapha__get_file_map` | `grapha repo map` |
@@ -30,6 +31,7 @@ description: "Use when work in this repo needs to find symbols, read callers/cal
 
 - After a search, pass the canonical `id` (preferred) or name to `get_symbol_context` — you get callers, callees, implementors, containment, type references, and any stored annotation in one call.
 - For a multi-symbol question (e.g., "compare the three view models"), use `batch_context({ symbols: [...] })` instead of N separate calls.
+- Before broadening a protocol, moving a manager/service, or preserving a type's public surface, use `get_api_surface` / `grapha symbol api` instead of reading every extension by hand.
 - Use `get_file_symbols` before `Read`-ing a file: get the symbol layout, then `Read` only the slice you need.
 - If you already have a plan listing many files, use `batch_file_symbols({ files: [...] })` or `grapha symbol files ...` before doing many individual reads.
 

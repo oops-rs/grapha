@@ -297,6 +297,51 @@ fn symbol_files_batches_file_symbol_maps() {
 }
 
 #[test]
+fn symbol_api_lists_impl_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("service.rs"),
+        "pub struct Service;\nimpl Service {\n    pub fn start(&self) {}\n    fn hidden(&self) {}\n}\n",
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = grapha()
+        .args([
+            "symbol",
+            "api",
+            "Service",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    let member_names: Vec<_> = parsed["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|member| member["symbol"]["name"].as_str().unwrap())
+        .collect();
+    assert!(member_names.contains(&"start"));
+    assert!(!member_names.contains(&"hidden"));
+}
+
+#[test]
 fn symbol_annotations_round_trip_through_cli_context_and_concept_search() {
     let dir = tempfile::tempdir().unwrap();
     let grapha_home = tempfile::tempdir().unwrap();

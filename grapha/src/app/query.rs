@@ -461,6 +461,22 @@ pub(crate) fn handle_symbol_command(
                 query::complexity::query_complexity(&graph, &symbol).map_err(|e| anyhow!("{e}"))?;
             print_json(&result)
         }
+        SymbolCommands::Api {
+            symbol,
+            include_private,
+            path,
+        } => {
+            let graph = load_graph(&path)?;
+            let result = resolve_query_result(
+                query::api_surface::query_api_surface(
+                    &graph,
+                    &symbol,
+                    query::api_surface::ApiSurfaceOptions { include_private },
+                ),
+                "symbol",
+            )?;
+            print_json(&result)
+        }
         SymbolCommands::File {
             file,
             path,

@@ -398,6 +398,29 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "get_api_surface".to_string(),
+            description: "List API-like members declared on a type and its extensions, plus referenced types from member type relationships. Use before broadening protocols or moving manager/service types.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Type name or ID"
+                    },
+                    "include_private": {
+                        "type": "boolean",
+                        "description": "Include private members as well as public/crate-visible members (default: false)",
+                        "default": false
+                    },
+                    "fields": {
+                        "type": "string",
+                        "description": "Optional comma-separated projected symbol fields to include (file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or full/all/none)"
+                    }
+                },
+                "required": ["symbol"]
+            }),
+        },
+        ToolDefinition {
             name: "detect_smells".to_string(),
             description: "Scan for code smells across the repo or within a specific module, file, or symbol scope: god types (>15 properties), excessive dependencies (>10), wide invalidation surfaces (>5 sources), massive inits (>8 params), deep nesting (>5 levels), high fan-out/fan-in (>15 calls), and many extensions (>5). Returns smells sorted by severity.".to_string(),
             input_schema: json!({
@@ -755,6 +778,7 @@ pub fn handle_tool_call(state: &mut McpState, tool_name: &str, arguments: &Value
         "batch_file_symbols" => handle_batch_file_symbols(state, arguments),
         "batch_context" => handle_batch_context(state, arguments),
         "analyze_complexity" => handle_analyze_complexity(state, arguments),
+        "get_api_surface" => handle_get_api_surface(state, arguments),
         "detect_smells" => handle_detect_smells(state, arguments),
         "get_module_summary" => handle_get_module_summary(state),
         "search_concepts" => handle_search_concepts(state, arguments),
@@ -1196,6 +1220,30 @@ fn handle_analyze_complexity(state: &mut McpState, arguments: &Value) -> Value {
     }
 }
 
+fn handle_get_api_surface(state: &mut McpState, arguments: &Value) -> Value {
+    let query = match arguments.get("symbol").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return tool_error("missing required parameter: symbol".to_string()),
+    };
+    let symbol_id = match resolve_symbol(state, query) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    let include_private = arguments
+        .get("include_private")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    match query::api_surface::query_api_surface(
+        &state.graph,
+        &symbol_id,
+        query::api_surface::ApiSurfaceOptions { include_private },
+    ) {
+        Ok(result) => serialize_result_with_fields(&result, fields_from_arguments(arguments)),
+        Err(e) => tool_error(format_query_error(&e)),
+    }
+}
+
 fn handle_detect_smells(state: &McpState, arguments: &Value) -> Value {
     let module_filter = arguments.get("module").and_then(|v| v.as_str());
     let file_filter = arguments.get("file").and_then(|v| v.as_str());
@@ -1457,7 +1505,7 @@ mod tests {
     #[test]
     fn tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 19);
+        assert_eq!(tools.len(), 20);
 
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"search_symbols"));
@@ -1471,6 +1519,7 @@ mod tests {
         assert!(names.contains(&"batch_file_symbols"));
         assert!(names.contains(&"batch_context"));
         assert!(names.contains(&"analyze_complexity"));
+        assert!(names.contains(&"get_api_surface"));
         assert!(names.contains(&"detect_smells"));
         assert!(names.contains(&"get_module_summary"));
         assert!(names.contains(&"search_concepts"));
@@ -1619,6 +1668,33 @@ mod tests {
     }
 
     #[test]
+    fn get_api_surface_returns_members_with_projected_fields() {
+        let mut state = make_test_state_with_api_surface();
+        let result = handle_tool_call(
+            &mut state,
+            "get_api_surface",
+            &json!({
+                "symbol": "GameManager",
+                "fields": "signature"
+            }),
+        );
+
+        assert!(
+            !result
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
+        let parsed = text_json(&result);
+        assert_eq!(parsed["total_members"], 1);
+        let member = &parsed["members"][0]["symbol"];
+        assert_eq!(member["name"], "fetchReward()");
+        assert_eq!(member["signature"], "func fetchReward()");
+        assert!(member.get("file").is_none());
+        assert!(member.get("id").is_none());
+    }
+
+    #[test]
     fn detect_smells_on_empty_graph() {
         let mut state = make_test_state();
         let result = handle_tool_call(&mut state, "detect_smells", &json!({}));
@@ -1745,6 +1821,58 @@ mod tests {
                 edge("src/caller_a.rs::caller_a", "src/target.rs::target"),
                 edge("src/caller_b.rs::caller_b", "src/target.rs::target"),
             ],
+        };
+        let schema = tantivy::schema::Schema::builder().build();
+        let index = Index::create_in_ram(schema);
+        McpState {
+            graph,
+            search_index: index,
+            project_root: PathBuf::from("/tmp/project"),
+            store_path: PathBuf::from("/tmp/test"),
+            recall: Recall::new(),
+        }
+    }
+
+    fn make_test_state_with_api_surface() -> McpState {
+        fn node(id: &str, name: &str, kind: NodeKind) -> Node {
+            Node {
+                id: id.into(),
+                kind,
+                name: name.into(),
+                file: PathBuf::from("src/GameManager.swift"),
+                span: Span {
+                    start: [1, 0],
+                    end: [3, 0],
+                },
+                visibility: Visibility::Public,
+                metadata: HashMap::new(),
+                role: None,
+                signature: Some(format!("func {name}")),
+                doc_comment: None,
+                module: Some("Game".to_string()),
+                snippet: None,
+                repo: None,
+            }
+        }
+
+        let graph = Graph {
+            version: String::new(),
+            nodes: vec![
+                node("type", "GameManager", NodeKind::Class),
+                node("member", "fetchReward()", NodeKind::Function),
+            ],
+            edges: vec![Edge {
+                source: "type".into(),
+                target: "member".into(),
+                kind: EdgeKind::Contains,
+                confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
+                provenance: vec![],
+                repo: None,
+            }],
         };
         let schema = tantivy::schema::Schema::builder().build();
         let index = Index::create_in_ram(schema);

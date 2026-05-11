@@ -446,6 +446,17 @@ enum SymbolCommands {
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
     },
+    /// List the API-like members declared on a type and its extensions
+    Api {
+        /// Type name or ID to analyze
+        symbol: String,
+        /// Include private members as well as public/crate-visible members
+        #[arg(long)]
+        include_private: bool,
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
     /// List all declarations in a file, ordered by source position
     File {
         /// File name or path suffix (e.g. "RoomPage.swift" or "src/main.rs")

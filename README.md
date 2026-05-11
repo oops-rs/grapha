@@ -104,6 +104,7 @@ grapha symbol search "query" [--context] [--fields file,id,locator,module,repo,s
 grapha symbol context <symbol> [--format json|tree|brief] [--fields full] [--limit N]
 grapha symbol impact <symbol> [--depth N] [--format json|tree|brief] [--fields file,module,repo] [--limit N]
 grapha symbol complexity <symbol>
+grapha symbol api <type> [--include-private]
 grapha symbol file <path>
 grapha symbol files <path>...
 grapha symbol annotate <symbol> "note" [--by agent]
@@ -225,6 +226,7 @@ Available MCP tools:
 | `batch_file_symbols` | Declarations for multiple files in one compact payload |
 | `batch_context` | Context for up to 20 symbols in one call |
 | `analyze_complexity` | Structural metrics and severity rating for a type |
+| `get_api_surface` | API-like members declared on a type and its extensions |
 | `detect_smells` | Code smell scan scoped to repo, module, file, or symbol |
 | `get_module_summary` | Per-module metrics and cross-module coupling ratio |
 | `search_concepts` | Business concept lookup across bindings, localization, assets, and symbols |
