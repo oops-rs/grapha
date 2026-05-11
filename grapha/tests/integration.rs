@@ -239,6 +239,64 @@ fn doc_comments_drive_search_concepts_and_compact_output() {
 }
 
 #[test]
+fn symbol_files_batches_file_symbol_maps() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(dir.path().join("alpha.rs"), "pub fn alpha() {}\n").unwrap();
+    std::fs::write(dir.path().join("beta.rs"), "pub struct Beta;\n").unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = grapha()
+        .args([
+            "symbol",
+            "files",
+            "alpha.rs",
+            "missing.rs",
+            "beta.rs",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["total_files"], 2);
+    assert!(
+        parsed["total_symbols"]
+            .as_u64()
+            .is_some_and(|total| total >= 2),
+        "batch output should include at least the two requested declarations: {parsed:#?}"
+    );
+    assert_eq!(parsed["missing"], serde_json::json!(["missing.rs"]));
+    assert!(
+        parsed["files"][0]["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol["name"] == "alpha")
+    );
+    assert!(
+        parsed["files"][1]["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol["name"] == "Beta")
+    );
+}
+
+#[test]
 fn symbol_annotations_round_trip_through_cli_context_and_concept_search() {
     let dir = tempfile::tempdir().unwrap();
     let grapha_home = tempfile::tempdir().unwrap();

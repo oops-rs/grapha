@@ -336,6 +336,30 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "batch_file_symbols".to_string(),
+            description: "List declarations for multiple files in one call. Use this before reading many known files so agents can orient from compact symbol maps first.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File names or path suffixes"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum symbols returned per file (default: 50)",
+                        "default": 50
+                    },
+                    "fields": {
+                        "type": "string",
+                        "description": "Optional comma-separated projected symbol fields to include (file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or full/all/none)"
+                    }
+                },
+                "required": ["files"]
+            }),
+        },
+        ToolDefinition {
             name: "batch_context".to_string(),
             description: "Get 360-degree context for multiple symbols in a single call. Returns a map of symbol ID to context result. More efficient than multiple get_symbol_context calls.".to_string(),
             input_schema: json!({
@@ -728,6 +752,7 @@ pub fn handle_tool_call(state: &mut McpState, tool_name: &str, arguments: &Value
         "get_file_map" => handle_get_file_map(state, arguments),
         "trace" => handle_trace(state, arguments),
         "get_file_symbols" => handle_get_file_symbols(state, arguments),
+        "batch_file_symbols" => handle_batch_file_symbols(state, arguments),
         "batch_context" => handle_batch_context(state, arguments),
         "analyze_complexity" => handle_analyze_complexity(state, arguments),
         "detect_smells" => handle_detect_smells(state, arguments),
@@ -1071,6 +1096,32 @@ fn handle_get_file_symbols(state: &McpState, arguments: &Value) -> Value {
     }
 }
 
+fn handle_batch_file_symbols(state: &McpState, arguments: &Value) -> Value {
+    let files = match arguments.get("files").and_then(|v| v.as_array()) {
+        Some(files) => files,
+        None => return tool_error("missing required parameter: files (array)".to_string()),
+    };
+    let file_queries: Vec<String> = files
+        .iter()
+        .filter_map(|value| value.as_str())
+        .map(String::from)
+        .collect();
+    if file_queries.is_empty() {
+        return tool_error("files array is empty".to_string());
+    }
+    if file_queries.len() > 50 {
+        return tool_error("batch_file_symbols supports at most 50 files per call".to_string());
+    }
+
+    let mut result = query::file_symbols::query_batch_file_symbols(&state.graph, &file_queries);
+    let limit = limit_from_arguments(arguments, 50);
+    for file in &mut result.files {
+        file.symbols.truncate(limit);
+    }
+
+    serialize_result_with_fields(&result, fields_from_arguments(arguments))
+}
+
 fn handle_batch_context(state: &mut McpState, arguments: &Value) -> Value {
     let symbols = match arguments.get("symbols").and_then(|v| v.as_array()) {
         Some(arr) => arr,
@@ -1406,7 +1457,7 @@ mod tests {
     #[test]
     fn tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 19);
 
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"search_symbols"));
@@ -1417,6 +1468,7 @@ mod tests {
         assert!(names.contains(&"get_file_map"));
         assert!(names.contains(&"trace"));
         assert!(names.contains(&"get_file_symbols"));
+        assert!(names.contains(&"batch_file_symbols"));
         assert!(names.contains(&"batch_context"));
         assert!(names.contains(&"analyze_complexity"));
         assert!(names.contains(&"detect_smells"));
@@ -1475,6 +1527,36 @@ mod tests {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
         );
+    }
+
+    #[test]
+    fn batch_file_symbols_respects_limit_and_fields() {
+        let mut state = make_test_state_with_context();
+        let result = handle_tool_call(
+            &mut state,
+            "batch_file_symbols",
+            &json!({
+                "files": ["src/caller_a.rs", "src/target.rs", "missing.rs"],
+                "limit": 1,
+                "fields": "locator"
+            }),
+        );
+
+        assert!(
+            !result
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
+        let parsed = text_json(&result);
+        assert_eq!(parsed["total_files"], 2);
+        assert_eq!(parsed["total_symbols"], 2);
+        assert_eq!(parsed["missing"], json!(["missing.rs"]));
+        let symbol = &parsed["files"][0]["symbols"][0];
+        assert_eq!(symbol["name"], "caller_a");
+        assert!(symbol.get("locator").is_some());
+        assert!(symbol.get("id").is_none());
+        assert!(symbol.get("file").is_none());
     }
 
     #[test]

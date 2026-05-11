@@ -478,6 +478,14 @@ pub(crate) fn handle_symbol_command(
                 print_json(&result)
             }
         }
+        SymbolCommands::Files { files, path } => {
+            let graph = load_graph(&path)?;
+            let result = query::file_symbols::query_batch_file_symbols(&graph, &files);
+            if result.total_files == 0 {
+                anyhow::bail!("no symbols found in requested files");
+            }
+            print_json(&result)
+        }
         SymbolCommands::Annotate {
             symbol,
             annotation,

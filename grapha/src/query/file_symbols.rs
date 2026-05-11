@@ -14,6 +14,14 @@ pub struct FileSymbolsResult {
 }
 
 #[derive(Debug, Serialize)]
+pub struct BatchFileSymbolsResult {
+    pub files: Vec<FileSymbolsResult>,
+    pub missing: Vec<String>,
+    pub total_files: usize,
+    pub total_symbols: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct FileSymbol {
     #[serde(flatten)]
     pub symbol: SymbolRef,
@@ -60,6 +68,33 @@ pub fn query_file_symbols(graph: &Graph, file_query: &str) -> FileSymbolsResult 
         file: file_query.to_string(),
         symbols,
         total,
+    }
+}
+
+pub fn query_batch_file_symbols(graph: &Graph, file_queries: &[String]) -> BatchFileSymbolsResult {
+    let mut seen = std::collections::HashSet::new();
+    let mut files = Vec::new();
+    let mut missing = Vec::new();
+
+    for file_query in file_queries {
+        if !seen.insert(file_query.as_str()) {
+            continue;
+        }
+        let result = query_file_symbols(graph, file_query);
+        if result.total == 0 {
+            missing.push(file_query.clone());
+        } else {
+            files.push(result);
+        }
+    }
+
+    let total_symbols = files.iter().map(|file| file.total).sum();
+    let total_files = files.len();
+    BatchFileSymbolsResult {
+        files,
+        missing,
+        total_files,
+        total_symbols,
     }
 }
 
@@ -140,5 +175,33 @@ mod tests {
 
         let result = query_file_symbols(&graph, "Foo.swift");
         assert_eq!(result.total, 1);
+    }
+
+    #[test]
+    fn batch_file_symbols_dedupes_queries_and_reports_missing() {
+        let graph = Graph {
+            version: String::new(),
+            nodes: vec![
+                make_node("a", "Foo", NodeKind::Struct, "src/Foo.swift"),
+                make_node("b", "Bar", NodeKind::Function, "src/Bar.swift"),
+            ],
+            edges: vec![],
+        };
+
+        let result = query_batch_file_symbols(
+            &graph,
+            &[
+                "Foo.swift".to_string(),
+                "Foo.swift".to_string(),
+                "Missing.swift".to_string(),
+                "Bar.swift".to_string(),
+            ],
+        );
+
+        assert_eq!(result.total_files, 2);
+        assert_eq!(result.total_symbols, 2);
+        assert_eq!(result.files[0].file, "Foo.swift");
+        assert_eq!(result.files[1].file, "Bar.swift");
+        assert_eq!(result.missing, vec!["Missing.swift"]);
     }
 }

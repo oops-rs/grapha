@@ -105,6 +105,7 @@ grapha symbol context <symbol> [--format json|tree|brief] [--fields full] [--lim
 grapha symbol impact <symbol> [--depth N] [--format json|tree|brief] [--fields file,module,repo] [--limit N]
 grapha symbol complexity <symbol>
 grapha symbol file <path>
+grapha symbol files <path>...
 grapha symbol annotate <symbol> "note" [--by agent]
 grapha symbol annotation <symbol>
 ```
@@ -221,6 +222,7 @@ Available MCP tools:
 | `get_file_map` | File and symbol map organized by module and directory |
 | `trace` | Forward dataflow to terminals or reverse dataflow to entry points |
 | `get_file_symbols` | All declarations in a file, ordered by source position |
+| `batch_file_symbols` | Declarations for multiple files in one compact payload |
 | `batch_context` | Context for up to 20 symbols in one call |
 | `analyze_complexity` | Structural metrics and severity rating for a type |
 | `detect_smells` | Code smell scan scoped to repo, module, file, or symbol |

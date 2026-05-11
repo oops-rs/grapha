@@ -456,6 +456,15 @@ enum SymbolCommands {
         #[command(flatten)]
         cluster: ClusterArgs,
     },
+    /// List declarations for multiple files in one JSON payload
+    Files {
+        /// File names or path suffixes (e.g. "RoomPage.swift" or "src/main.rs")
+        #[arg(required = true)]
+        files: Vec<String>,
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
     /// Attach an agent-written annotation to a symbol
     Annotate {
         /// Symbol name, locator, ID, or Swift USR
