@@ -23,7 +23,7 @@ description: "Use when work in this repo needs forward dataflow traces to termin
 
 - Tight forward trace: `mcp__grapha__trace({ symbol: "<sym>", direction: "forward", depth: 5 })`. Depth defaults to 10 forward / unlimited reverse — start tighter and widen only if you don't see the terminal you expected.
 - Reverse-from-terminal: pick a sensitive sink (e.g., the network call), reverse-trace, and the result is the set of entry points that can hit it. Pair with `grapha-quality`'s `get_impact` for a fuller change-risk picture.
-- Cluster long traces with `cluster: true` and page through bands.
+- For CLI flows with long traces, pipe Grapha JSON through FACE for grouping and paging. For MCP-only sessions, use Grapha's built-in `cluster: true` and page through bands.
 
 ## Tips
 

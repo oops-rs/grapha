@@ -7,6 +7,13 @@ description: "Use at the start of any code task in this repo — sets the Grapha
 
 You're doing normal coding work in a repo where Grapha is installed. Grapha is a code intelligence layer that indexes symbols, callers/callees, impact, dataflow, complexity, and durable annotations. Use it as a tool inside your normal workflow, not as a workflow of its own.
 
+Grapha answers code-intelligence questions. FACE (`face`) handles generic grouping, paging, and drill-down for large structured CLI outputs. When using the CLI and a Grapha command returns many JSON records, pipe the records to FACE instead of asking Grapha to solve presentation:
+
+```bash
+grapha symbol search "RoomPage" --limit 200 --fields score,file,locator,kind,module \
+  | face --by file --within kind
+```
+
 ## Where Grapha fits
 
 - **Orienting in unfamiliar code.** Don't `Grep` for a function or type name; don't `Read` a whole file to "see what's in it." Ask Grapha for symbols, 360° context, or a file's symbol map — then `Read` only the slice you need. Specialist: `grapha-search`.

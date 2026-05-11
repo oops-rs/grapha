@@ -24,7 +24,8 @@ description: "Use when work in this repo needs blast-radius checks, type complex
 ## Recipes
 
 - Scope smells to a hot area: `mcp__grapha__detect_smells({ module: "Room" })` or `{ file: "RoomPage.swift" }` or `{ symbol: "RoomPageViewModel" }`. Don't run a repo-wide smell scan when a focused one will do.
-- Cluster long impact/smell lists with `cluster: true`, then page through `cluster_id: "excellent"|"strong"|"possible"|"weak"` instead of reading one giant list.
+- For CLI flows with long impact, smell, or module lists, pipe Grapha JSON through FACE for grouping and paging. Example: `grapha repo modules | face --score symbol_count --by name`.
+- For MCP-only sessions, use Grapha's built-in `cluster: true` and page through `cluster_id: "excellent"|"strong"|"possible"|"weak"` because MCP cannot pipe directly to FACE.
 - Pair `get_impact` with `get_symbol_context` (from `grapha-search`): impact tells you *what* breaks, context tells you *how* the symbol is shaped today.
 
 ## Tips

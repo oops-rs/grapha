@@ -31,7 +31,21 @@ description: "Use when work in this repo needs to find symbols, read callers/cal
 - For a multi-symbol question (e.g., "compare the three view models"), use `batch_context({ symbols: [...] })` instead of N separate calls.
 - Use `get_file_symbols` before `Read`-ing a file: get the symbol layout, then `Read` only the slice you need.
 
+## Large CLI result sets
+
+Grapha should answer the code question; FACE should organize the records. For broad searches or file/module result sets, request compact fields from Grapha and pipe the JSON to `face`:
+
+```bash
+grapha symbol search "<q>" --limit 200 --fields score,file,locator,kind,module \
+  | face --by file --within kind
+
+grapha symbol search "<q>" --limit 200 --fields score,file,locator,kind,module \
+  | face --by module --within file --within score --preset bm25
+```
+
+Use `face --schema` when you are unsure which fields are available, and save `face --format=json` envelopes when you expect to drill repeatedly.
+
 ## Tips
 
-- Score-band clustering (`cluster: true`, `cluster_id`, `cluster_page`) is useful when a query returns hundreds of matches — page through `excellent`/`strong`/`possible`/`weak` bands instead of skimming a flat list.
+- For MCP-only sessions, use Grapha's `limit`, `fields`, and `cluster` options where available because MCP cannot pipe directly to FACE.
 - If snippets look truncated or stale, run `grapha index .` (and `mcp__grapha__reload` if MCP is mounted), then retry — the snippets are stored at index time.

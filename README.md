@@ -50,6 +50,10 @@ grapha symbol search "ViewModel" --kind struct --context --fields full
 grapha symbol search "send" --kind function --module Room --fuzzy --declarations-only
 grapha symbol search "ProfileAPI" --repo FrameUI --fields file,repo,locator
 
+# Group and page larger result sets with FACE
+grapha symbol search "ViewModel" --limit 200 --fields score,file,locator,kind,module \
+  | face --by file --within kind
+
 # Inspect a symbol neighborhood
 grapha symbol context RoomPage --format tree
 grapha symbol context File.swift::helper --fields full
@@ -106,6 +110,18 @@ grapha symbol annotation <symbol>
 ```
 
 Use exact IDs, locators, or disambiguating forms such as `File.swift::helper` when multiple symbols share a name. Tree and brief formats are meant for humans; JSON is stable for scripts and agents.
+
+For large JSON result sets, keep Grapha focused on code facts and pipe those records through [FACE](https://github.com/oops-rs/face) for grouping, paging, and drill-down:
+
+```bash
+grapha symbol search "GameManager" --limit 200 --fields score,file,locator,kind,module \
+  | face --by file --within kind
+
+grapha repo modules \
+  | face --score symbol_count --by name
+```
+
+FACE accepts Grapha's JSON output directly, auto-detects item arrays and score fields, and can emit a reusable JSON envelope for repeated drills.
 
 ### Dataflow
 
