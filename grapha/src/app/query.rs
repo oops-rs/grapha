@@ -477,6 +477,26 @@ pub(crate) fn handle_symbol_command(
             )?;
             print_json(&result)
         }
+        SymbolCommands::Usages {
+            symbol,
+            exclude_files,
+            limit,
+            path,
+        } => {
+            let graph = load_graph(&path)?;
+            let result = resolve_query_result(
+                query::symbol_usages::query_symbol_usages(
+                    &graph,
+                    &symbol,
+                    query::symbol_usages::SymbolUsagesOptions {
+                        exclude_files,
+                        limit_per_group: Some(limit.max(1)),
+                    },
+                ),
+                "symbol",
+            )?;
+            print_json(&result)
+        }
         SymbolCommands::File {
             file,
             path,

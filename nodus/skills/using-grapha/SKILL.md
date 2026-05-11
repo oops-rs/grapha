@@ -27,7 +27,7 @@ Load the matching specialist skill when you reach that step — don't pre-load. 
 
 | If your step is… | Load… | It covers |
 |---|---|---|
-| Find / read / orient | `grapha-search` | `search_symbols`, `get_symbol_context`, `batch_context`, `get_api_surface`, `get_file_symbols`, `batch_file_symbols`, `get_file_map` |
+| Find / read / orient | `grapha-search` | `search_symbols`, `get_symbol_context`, `batch_context`, `get_api_surface`, `find_usages`, `get_file_symbols`, `batch_file_symbols`, `get_file_map` |
 | Assess change risk and structural health | `grapha-quality` | `get_impact`, `analyze_complexity`, `detect_smells`, `get_module_summary` |
 | Trace data through the graph | `grapha-dataflow` | `trace` (forward/reverse), flow entries |
 | Persist / read durable code knowledge | `grapha-knowledge` | `annotate_symbol`, annotation serve/list/sync, concept search/bind/alias |

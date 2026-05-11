@@ -342,6 +342,53 @@ fn symbol_api_lists_impl_members() {
 }
 
 #[test]
+fn symbol_usages_reports_grouped_call_sites() {
+    let dir = index_temp_rust_project(
+        "pub struct Service;\n\
+         impl Service {\n\
+             pub fn start(&self) {}\n\
+         }\n\
+         pub fn make_service() -> Service { Service }\n\
+         pub fn caller(service: &Service) { service.start(); }\n",
+    );
+
+    let output = grapha()
+        .args([
+            "symbol",
+            "usages",
+            "Service",
+            "--limit",
+            "1",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["symbol"]["name"], "Service");
+    assert!(
+        parsed["total_usages"]
+            .as_u64()
+            .is_some_and(|total| total >= 1),
+        "expected at least one Service usage: {parsed:#?}"
+    );
+    assert!(
+        parsed["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|group| group["usages"]
+                .as_array()
+                .is_some_and(|usages| !usages.is_empty())),
+        "expected a returned usage site: {parsed:#?}"
+    );
+}
+
+#[test]
 fn symbol_annotations_round_trip_through_cli_context_and_concept_search() {
     let dir = tempfile::tempdir().unwrap();
     let grapha_home = tempfile::tempdir().unwrap();

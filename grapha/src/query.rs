@@ -14,6 +14,7 @@ pub mod module_summary;
 pub mod origin;
 pub mod reverse;
 pub mod smells;
+pub mod symbol_usages;
 pub mod trace;
 pub mod usages;
 

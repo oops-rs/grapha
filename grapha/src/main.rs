@@ -457,6 +457,20 @@ enum SymbolCommands {
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
     },
+    /// Find usage sites for a symbol, or for every member on a type surface
+    Usages {
+        /// Symbol, type name, locator, or ID to inspect
+        symbol: String,
+        /// Source file substring to exclude; repeat for generated/export wrappers
+        #[arg(long = "exclude")]
+        exclude_files: Vec<String>,
+        /// Maximum usage sites returned per target group
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
     /// List all declarations in a file, ordered by source position
     File {
         /// File name or path suffix (e.g. "RoomPage.swift" or "src/main.rs")

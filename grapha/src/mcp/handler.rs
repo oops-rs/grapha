@@ -421,6 +421,34 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "find_usages".to_string(),
+            description: "Find usage sites for a symbol. For type queries, groups usage sites by the type itself and by API-like members on its surface, so agents can inspect call sites without one tool call per member.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Symbol, type name, locator, or ID"
+                    },
+                    "exclude_files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Source file substrings to exclude from usage sites, such as generated export wrappers"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum usage sites returned per target group (default: 20)",
+                        "default": 20
+                    },
+                    "fields": {
+                        "type": "string",
+                        "description": "Optional comma-separated projected symbol fields to include (file,id,locator,module,repo,span,snippet,visibility,signature,doc_comment,annotation,role; or full/all/none)"
+                    }
+                },
+                "required": ["symbol"]
+            }),
+        },
+        ToolDefinition {
             name: "detect_smells".to_string(),
             description: "Scan for code smells across the repo or within a specific module, file, or symbol scope: god types (>15 properties), excessive dependencies (>10), wide invalidation surfaces (>5 sources), massive inits (>8 params), deep nesting (>5 levels), high fan-out/fan-in (>15 calls), and many extensions (>5). Returns smells sorted by severity.".to_string(),
             input_schema: json!({
@@ -779,6 +807,7 @@ pub fn handle_tool_call(state: &mut McpState, tool_name: &str, arguments: &Value
         "batch_context" => handle_batch_context(state, arguments),
         "analyze_complexity" => handle_analyze_complexity(state, arguments),
         "get_api_surface" => handle_get_api_surface(state, arguments),
+        "find_usages" => handle_find_usages(state, arguments),
         "detect_smells" => handle_detect_smells(state, arguments),
         "get_module_summary" => handle_get_module_summary(state),
         "search_concepts" => handle_search_concepts(state, arguments),
@@ -1244,6 +1273,41 @@ fn handle_get_api_surface(state: &mut McpState, arguments: &Value) -> Value {
     }
 }
 
+fn handle_find_usages(state: &mut McpState, arguments: &Value) -> Value {
+    let query = match arguments.get("symbol").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return tool_error("missing required parameter: symbol".to_string()),
+    };
+    let symbol_id = match resolve_symbol(state, query) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    let exclude_files = arguments
+        .get("exclude_files")
+        .and_then(|v| v.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    let limit = limit_from_arguments(arguments, 20);
+
+    match query::symbol_usages::query_symbol_usages(
+        &state.graph,
+        &symbol_id,
+        query::symbol_usages::SymbolUsagesOptions {
+            exclude_files,
+            limit_per_group: Some(limit),
+        },
+    ) {
+        Ok(result) => serialize_result_with_fields(&result, fields_from_arguments(arguments)),
+        Err(e) => tool_error(format_query_error(&e)),
+    }
+}
+
 fn handle_detect_smells(state: &McpState, arguments: &Value) -> Value {
     let module_filter = arguments.get("module").and_then(|v| v.as_str());
     let file_filter = arguments.get("file").and_then(|v| v.as_str());
@@ -1505,7 +1569,7 @@ mod tests {
     #[test]
     fn tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 21);
 
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"search_symbols"));
@@ -1520,6 +1584,7 @@ mod tests {
         assert!(names.contains(&"batch_context"));
         assert!(names.contains(&"analyze_complexity"));
         assert!(names.contains(&"get_api_surface"));
+        assert!(names.contains(&"find_usages"));
         assert!(names.contains(&"detect_smells"));
         assert!(names.contains(&"get_module_summary"));
         assert!(names.contains(&"search_concepts"));
@@ -1692,6 +1757,40 @@ mod tests {
         assert_eq!(member["signature"], "func fetchReward()");
         assert!(member.get("file").is_none());
         assert!(member.get("id").is_none());
+    }
+
+    #[test]
+    fn find_usages_groups_type_surface_and_projects_fields() {
+        let mut state = make_test_state_with_symbol_usages();
+        let result = handle_tool_call(
+            &mut state,
+            "find_usages",
+            &json!({
+                "symbol": "GameManager",
+                "exclude_files": ["Generated/"],
+                "limit": 1,
+                "fields": "locator"
+            }),
+        );
+
+        assert!(
+            !result
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
+        let parsed = text_json(&result);
+        assert_eq!(parsed["total_groups"], 1);
+        assert_eq!(parsed["total_usages"], 2);
+        let group = &parsed["groups"][0];
+        assert_eq!(group["target"]["name"], "fetchReward()");
+        assert_eq!(group["total"], 2);
+        assert_eq!(group["usages"].as_array().unwrap().len(), 1);
+        let source = &group["usages"][0]["source"];
+        assert_eq!(source["name"], "screenA()");
+        assert!(source.get("locator").is_some());
+        assert!(source.get("file").is_none());
+        assert!(source.get("id").is_none());
     }
 
     #[test]
@@ -1873,6 +1972,80 @@ mod tests {
                 provenance: vec![],
                 repo: None,
             }],
+        };
+        let schema = tantivy::schema::Schema::builder().build();
+        let index = Index::create_in_ram(schema);
+        McpState {
+            graph,
+            search_index: index,
+            project_root: PathBuf::from("/tmp/project"),
+            store_path: PathBuf::from("/tmp/test"),
+            recall: Recall::new(),
+        }
+    }
+
+    fn make_test_state_with_symbol_usages() -> McpState {
+        fn node(id: &str, name: &str, kind: NodeKind, file: &str) -> Node {
+            Node {
+                id: id.into(),
+                kind,
+                name: name.into(),
+                file: PathBuf::from(file),
+                span: Span {
+                    start: [1, 0],
+                    end: [3, 0],
+                },
+                visibility: Visibility::Public,
+                metadata: HashMap::new(),
+                role: None,
+                signature: Some(format!("func {name}")),
+                doc_comment: None,
+                module: Some("Game".to_string()),
+                snippet: None,
+                repo: None,
+            }
+        }
+
+        fn edge(source: &str, target: &str, kind: EdgeKind) -> Edge {
+            Edge {
+                source: source.into(),
+                target: target.into(),
+                kind,
+                confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
+                provenance: vec![],
+                repo: None,
+            }
+        }
+
+        let graph = Graph {
+            version: String::new(),
+            nodes: vec![
+                node("type", "GameManager", NodeKind::Class, "GameManager.swift"),
+                node(
+                    "member",
+                    "fetchReward()",
+                    NodeKind::Function,
+                    "GameManager.swift",
+                ),
+                node("caller_a", "screenA()", NodeKind::Function, "ScreenA.swift"),
+                node("caller_b", "screenB()", NodeKind::Function, "ScreenB.swift"),
+                node(
+                    "generated",
+                    "exported()",
+                    NodeKind::Function,
+                    "Generated/GameManagerExports.swift",
+                ),
+            ],
+            edges: vec![
+                edge("type", "member", EdgeKind::Contains),
+                edge("caller_a", "member", EdgeKind::Calls),
+                edge("caller_b", "member", EdgeKind::Calls),
+                edge("generated", "member", EdgeKind::Calls),
+            ],
         };
         let schema = tantivy::schema::Schema::builder().build();
         let index = Index::create_in_ram(schema);
