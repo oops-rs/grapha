@@ -411,7 +411,7 @@ pub(crate) fn run_pipeline(
         if !ext_context.index_store_enabled {
             grapha_swift::clear_index_store_path(&ext_context.project_root);
         }
-        if let Ok(ext_modules) = grapha_core::discover_modules(&registry, &ext_context) {
+        if let Ok(ext_modules) = grapha_core::discover_modules(&registry, ext_context) {
             module_map.merge(ext_modules);
         }
     }

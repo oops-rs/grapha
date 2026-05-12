@@ -151,6 +151,7 @@ fn summarize_dependents(direct_nodes: &[&Node], all_nodes: &[&Node]) -> ImpactSu
     }
 }
 
+#[cfg(test)]
 pub fn query_impact(
     graph: &Graph,
     symbol: &str,

@@ -7,17 +7,9 @@ use crate::symbol_locator::SymbolLocatorIndex;
 
 use super::{QueryResolveError, SymbolInfo, SymbolRef, normalize_symbol_name};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ApiSurfaceOptions {
     pub include_private: bool,
-}
-
-impl Default for ApiSurfaceOptions {
-    fn default() -> Self {
-        Self {
-            include_private: false,
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]
