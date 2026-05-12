@@ -1,6 +1,6 @@
 ---
 name: using-grapha
-description: "Use at the start of any code task in this repo — sets the Grapha workflow and points at the right specialist."
+description: "Use when starting any coding conversation — sets the Grapha workflow and points at the right specialist."
 ---
 
 # Using Grapha
