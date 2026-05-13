@@ -4,6 +4,7 @@
 .codex
 .worktrees
 
+.nodus
 nodus.lock
 
 target
