@@ -35,20 +35,68 @@ pub(crate) fn handle_mcp(
     verbose: bool,
 ) -> anyhow::Result<()> {
     let options = resolve_mcp_options(&path, watch_mode);
-    let graph = load_graph(&path)?;
-    let search_index = open_search_index(&path, verbose)?;
-    let state = mcp::handler::McpState {
-        graph,
-        search_index,
-        project_root: path.clone(),
-        store_path: path.join(".grapha"),
-        recall: recall::Recall::new(),
+    let store_path = path.join(".grapha");
+    let state = match build_initial_state(&path, &store_path, verbose) {
+        Ok(state) => state,
+        Err(error) => {
+            if verbose {
+                eprintln!(
+                    "mcp: no usable index at {} ({error}); will auto-index on first tool call",
+                    store_path.display()
+                );
+            }
+            empty_state_for_lazy_index(path.clone(), store_path.clone())
+        }
     };
 
     if options.watch {
         run_mcp_with_watch(path, state, verbose)
     } else {
         mcp::run_mcp_server(state)
+    }
+}
+
+fn build_initial_state(
+    path: &std::path::Path,
+    store_path: &std::path::Path,
+    verbose: bool,
+) -> anyhow::Result<mcp::handler::McpState> {
+    if !store_path.join("grapha.db").exists() {
+        anyhow::bail!(
+            "no index database at {}",
+            store_path.join("grapha.db").display()
+        );
+    }
+
+    let graph = load_graph(path)?;
+    let search_index = open_search_index(path, verbose)?;
+    Ok(mcp::handler::McpState {
+        graph,
+        search_index,
+        project_root: path.to_path_buf(),
+        store_path: store_path.to_path_buf(),
+        recall: recall::Recall::new(),
+        needs_index: false,
+    })
+}
+
+fn empty_state_for_lazy_index(
+    project_root: PathBuf,
+    store_path: PathBuf,
+) -> mcp::handler::McpState {
+    let schema = tantivy::schema::Schema::builder().build();
+    let search_index = tantivy::Index::create_in_ram(schema);
+    mcp::handler::McpState {
+        graph: grapha_core::graph::Graph {
+            version: String::new(),
+            nodes: vec![],
+            edges: vec![],
+        },
+        search_index,
+        project_root,
+        store_path,
+        recall: recall::Recall::new(),
+        needs_index: true,
     }
 }
 
@@ -73,6 +121,13 @@ fn run_mcp_with_watch(
                     watch::WatchEvent::FilesChanged(files) => {
                         if verbose {
                             eprintln!("watch: {} file(s) changed, re-indexing...", files.len());
+                        }
+                        if let Err(e) = std::fs::create_dir_all(&store_path) {
+                            eprintln!(
+                                "watch: failed to create store dir {}: {e}",
+                                store_path.display()
+                            );
+                            continue;
                         }
                         match crate::app::pipeline::run_pipeline(
                             &project_path,

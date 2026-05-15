@@ -18,6 +18,85 @@ pub struct McpState {
     pub project_root: PathBuf,
     pub store_path: PathBuf,
     pub recall: Recall,
+    /// When true, the graph/search index have not been built yet and the
+    /// next tool call should trigger a full index pipeline run before
+    /// dispatching. Set when the MCP server is started against a project
+    /// that has no `.grapha` directory.
+    pub needs_index: bool,
+}
+
+/// Build (or rebuild) the on-disk index artifacts for `project_root`,
+/// returning the resulting graph and tantivy search index. Used both when
+/// the MCP server starts against a project that has no `.grapha` directory
+/// and as a recovery path if the index goes missing while the server is
+/// running.
+pub(crate) fn build_initial_index(
+    project_root: &std::path::Path,
+) -> anyhow::Result<(Graph, Index)> {
+    use anyhow::Context;
+
+    let store_path = project_root.join(".grapha");
+    std::fs::create_dir_all(&store_path).with_context(|| {
+        format!(
+            "failed to create grapha store directory {}",
+            store_path.display()
+        )
+    })?;
+
+    let pipeline = crate::app::pipeline::run_pipeline(project_root, false, false, None)
+        .context("failed to run extraction pipeline")?;
+    let graph = pipeline.graph;
+
+    let db_path = store_path.join("grapha.db");
+    let store = crate::store::sqlite::SqliteStore::new(db_path);
+    store
+        .save(&graph)
+        .context("failed to save graph to store")?;
+
+    let search_index_path = store_path.join("search_index");
+    let search_index = crate::search::build_index(&graph, &search_index_path)
+        .context("failed to build search index")?;
+
+    let config = crate::config::load_config(project_root);
+    crate::index_status::save_index_status(
+        project_root,
+        &store_path,
+        graph.nodes.len(),
+        graph.edges.len(),
+        &config,
+    )
+    .context("failed to save index status")?;
+
+    Ok((graph, search_index))
+}
+
+/// Ensure `state` has a populated graph and search index. When the server
+/// was started without a `.grapha` directory the graph and search index are
+/// placeholders; the first tool call triggers a full pipeline run here so
+/// callers see real results instead of an empty graph (or a startup error).
+///
+/// Returns `Err(tool_error_value)` if indexing fails so the caller can
+/// surface the failure as a normal tool error without crashing the server.
+pub(crate) fn ensure_indexed(state: &mut McpState) -> Result<(), Value> {
+    if !state.needs_index {
+        return Ok(());
+    }
+
+    match build_initial_index(&state.project_root) {
+        Ok((graph, search_index)) => {
+            state.graph = graph;
+            state.search_index = search_index;
+            state.store_path = state.project_root.join(".grapha");
+            let valid_ids: std::collections::HashSet<&str> =
+                state.graph.nodes.iter().map(|n| n.id.as_str()).collect();
+            state.recall.prune(&valid_ids);
+            state.needs_index = false;
+            Ok(())
+        }
+        Err(error) => Err(tool_error(format!(
+            "no grapha index found and automatic indexing failed: {error}"
+        ))),
+    }
 }
 
 pub fn tool_definitions() -> Vec<ToolDefinition> {
@@ -794,6 +873,10 @@ fn fields_from_arguments(arguments: &Value) -> Option<FieldSet> {
 }
 
 pub fn handle_tool_call(state: &mut McpState, tool_name: &str, arguments: &Value) -> Value {
+    if let Err(error_value) = ensure_indexed(state) {
+        return error_value;
+    }
+
     match tool_name {
         "search_symbols" => handle_search_symbols(state, arguments),
         "get_index_status" => handle_get_index_status(state),
@@ -1620,6 +1703,112 @@ mod tests {
     }
 
     #[test]
+    fn ensure_indexed_is_noop_when_index_present() {
+        // When needs_index is false the helper must not touch the filesystem or
+        // mutate state, so it is safe to point at a non-existent project root.
+        let mut state = make_test_state();
+        assert!(!state.needs_index);
+        assert!(ensure_indexed(&mut state).is_ok());
+        assert!(!state.needs_index);
+    }
+
+    #[test]
+    fn ensure_indexed_builds_index_when_missing() {
+        // When needs_index is true, a tool call must trigger a real pipeline
+        // run, persist artifacts under `.grapha/`, and flip the flag off.
+        use tempfile::TempDir;
+        let project_dir = TempDir::new().expect("create tempdir");
+        let project_root = project_dir.path().to_path_buf();
+        let src_dir = project_root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("main.rs"),
+            "fn greet() -> &'static str { \"hi\" }\nfn main() { let _ = greet(); }\n",
+        )
+        .unwrap();
+        // grapha.toml not strictly required, but config loaders treat its
+        // absence as defaults, which is exactly what the lazy path hits in
+        // production.
+
+        let schema = tantivy::schema::Schema::builder().build();
+        let placeholder = Index::create_in_ram(schema);
+        let mut state = McpState {
+            graph: Graph {
+                version: String::new(),
+                nodes: vec![],
+                edges: vec![],
+            },
+            search_index: placeholder,
+            project_root: project_root.clone(),
+            store_path: project_root.join(".grapha"),
+            recall: Recall::new(),
+            needs_index: true,
+        };
+
+        // No .grapha directory yet.
+        assert!(!project_root.join(".grapha").exists());
+
+        let result = handle_tool_call(&mut state, "get_file_map", &json!({}));
+        assert!(
+            !result
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "tool call should succeed after lazy index, got {result:?}"
+        );
+
+        assert!(
+            !state.needs_index,
+            "needs_index must flip to false after a successful index"
+        );
+        assert!(
+            project_root.join(".grapha/grapha.db").exists(),
+            "lazy index should have created .grapha/grapha.db"
+        );
+        assert!(
+            !state.graph.nodes.is_empty(),
+            "graph should contain extracted symbols, got {} nodes",
+            state.graph.nodes.len()
+        );
+    }
+
+    #[test]
+    fn ensure_indexed_returns_tool_error_when_pipeline_fails() {
+        // Point at a path that cannot be a project (a file) so the pipeline
+        // discovery step fails; the helper must surface a tool error without
+        // crashing the server.
+        use tempfile::NamedTempFile;
+        let not_a_dir = NamedTempFile::new().expect("create tempfile");
+        let bogus_path = not_a_dir.path().to_path_buf();
+
+        let schema = tantivy::schema::Schema::builder().build();
+        let placeholder = Index::create_in_ram(schema);
+        let mut state = McpState {
+            graph: Graph {
+                version: String::new(),
+                nodes: vec![],
+                edges: vec![],
+            },
+            search_index: placeholder,
+            project_root: bogus_path.clone(),
+            store_path: bogus_path.join(".grapha"),
+            recall: Recall::new(),
+            needs_index: true,
+        };
+
+        let result = handle_tool_call(&mut state, "get_file_map", &json!({}));
+        assert_eq!(
+            result.get("isError").and_then(|v| v.as_bool()),
+            Some(true),
+            "indexing failure should produce a tool error, got {result:?}"
+        );
+        assert!(
+            state.needs_index,
+            "needs_index should stay true so the next call can retry"
+        );
+    }
+
+    #[test]
     fn get_file_symbols_missing_file_returns_error() {
         let mut state = make_test_state();
         let result = handle_tool_call(&mut state, "get_file_symbols", &json!({}));
@@ -1869,6 +2058,7 @@ mod tests {
             project_root: PathBuf::from("/tmp/project"),
             store_path: PathBuf::from("/tmp/test"),
             recall: Recall::new(),
+            needs_index: false,
         }
     }
 
@@ -1929,6 +2119,7 @@ mod tests {
             project_root: PathBuf::from("/tmp/project"),
             store_path: PathBuf::from("/tmp/test"),
             recall: Recall::new(),
+            needs_index: false,
         }
     }
 
@@ -1981,6 +2172,7 @@ mod tests {
             project_root: PathBuf::from("/tmp/project"),
             store_path: PathBuf::from("/tmp/test"),
             recall: Recall::new(),
+            needs_index: false,
         }
     }
 
@@ -2055,6 +2247,7 @@ mod tests {
             project_root: PathBuf::from("/tmp/project"),
             store_path: PathBuf::from("/tmp/test"),
             recall: Recall::new(),
+            needs_index: false,
         }
     }
 
@@ -2254,6 +2447,7 @@ mod tests {
             project_root: PathBuf::from("/tmp/project"),
             store_path: PathBuf::from("/tmp/test"),
             recall: Recall::new(),
+            needs_index: false,
         }
     }
 }

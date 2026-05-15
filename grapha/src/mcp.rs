@@ -179,6 +179,7 @@ mod tests {
             project_root: PathBuf::from("/tmp/project"),
             store_path: PathBuf::from("/tmp/test"),
             recall: crate::recall::Recall::new(),
+            needs_index: false,
         }
     }
 
