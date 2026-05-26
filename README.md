@@ -36,6 +36,33 @@ brew install grapha
 cargo install grapha
 ```
 
+### Docker
+
+Run the HTTP graph explorer as a container. Mount the repository you want to
+explore at `/workspace`; the entrypoint indexes it on first start and then
+serves the graph on port `8080`.
+
+```bash
+# Build the image
+docker build -t grapha .
+
+# Serve the current repository at http://localhost:8080
+docker run --rm -p 8080:8080 -v "$PWD:/workspace" grapha
+
+# Or with docker compose (serves ./ by default)
+docker compose up --build
+GRAPHA_TARGET=/path/to/repo docker compose up   # explore another repo
+```
+
+The image indexes only when no `.grapha` store exists in the mount; set
+`GRAPHA_REINDEX=1` to rebuild on start. Pass an explicit grapha command to
+bypass the index-and-serve flow, e.g. `docker run --rm -v "$PWD:/workspace" grapha index /workspace --format json`.
+
+Linux containers build with the Swift bridge disabled
+(`GRAPHA_SWIFT_BRIDGE_MODE=off`), since Xcode's index store is macOS-only.
+Rust and the tree-sitter languages are fully supported; Swift falls back to
+tree-sitter extraction.
+
 ## Quick Start
 
 ```bash

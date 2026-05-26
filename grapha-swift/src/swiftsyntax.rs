@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 use std::path::Path;
 
 use grapha_core::ExtractionResult;
@@ -13,7 +13,7 @@ pub fn extract_with_swiftsyntax(source: &[u8], file_path: &Path) -> Option<Extra
     let file_path_c = CString::new(file_path.to_str()?).ok()?;
     let json_ptr = unsafe {
         (bridge.swiftsyntax_extract)(
-            source.as_ptr() as *const i8,
+            source.as_ptr() as *const c_char,
             source.len(),
             file_path_c.as_ptr(),
         )
@@ -24,7 +24,7 @@ pub fn extract_with_swiftsyntax(source: &[u8], file_path: &Path) -> Option<Extra
     }
 
     let json_bytes = unsafe { CStr::from_ptr(json_ptr) }.to_bytes().to_vec();
-    unsafe { (bridge.free_string)(json_ptr as *mut i8) };
+    unsafe { (bridge.free_string)(json_ptr as *mut c_char) };
     let result: ExtractionResult = serde_json::from_slice(&json_bytes).ok()?;
 
     Some(result)

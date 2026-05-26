@@ -1,3 +1,4 @@
+use std::ffi::c_char;
 #[cfg(not(no_swift_bridge))]
 use std::path::{Path, PathBuf};
 #[cfg(not(no_swift_bridge))]
@@ -28,13 +29,14 @@ impl TryFrom<i32> for IndexStoreStatus {
     }
 }
 
-type IndexStoreOpenFn = unsafe extern "C" fn(*const i8, *mut i32) -> *mut std::ffi::c_void;
+type IndexStoreOpenFn = unsafe extern "C" fn(*const c_char, *mut i32) -> *mut std::ffi::c_void;
 type IndexStoreCloseFn = unsafe extern "C" fn(*mut std::ffi::c_void);
 type IndexStoreExtractFn =
-    unsafe extern "C" fn(*mut std::ffi::c_void, *const i8, *mut u32, *mut i32) -> *const u8;
+    unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut u32, *mut i32) -> *const u8;
 type IndexStoreWarmupFn = unsafe extern "C" fn(*mut std::ffi::c_void);
-type SwiftSyntaxExtractFn = unsafe extern "C" fn(*const i8, usize, *const i8) -> *const i8;
-type FreeStringFn = unsafe extern "C" fn(*mut i8);
+type SwiftSyntaxExtractFn =
+    unsafe extern "C" fn(*const c_char, usize, *const c_char) -> *const c_char;
+type FreeStringFn = unsafe extern "C" fn(*mut c_char);
 type FreeBufferFn = unsafe extern "C" fn(*mut u8);
 
 pub struct SwiftBridge {

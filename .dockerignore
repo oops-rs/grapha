@@ -1,0 +1,39 @@
+# Build artifacts (rebuilt inside the container)
+target/
+**/target/
+grapha-swift/swift-bridge/.build/
+grapha-swift/swift-bridge/.swiftpm/
+grapha-swift/swift-bridge/Package.resolved
+
+# Local index / search store
+.grapha/
+**/.grapha/
+
+# VCS and editor/tooling state
+.git/
+.github/
+.worktrees/
+.claude/
+.codex/
+.opencode/
+.qlipoth/
+.fuli/
+.nodus/
+.agents/
+
+# Local config and secrets
+.mcp.json
+nodus.lock
+qlipoth.toml
+.DS_Store
+**/.DS_Store
+
+# Docs not needed for the build
+docs/
+*.md
+!README.md
+
+# Docker artifacts themselves
+Dockerfile
+.dockerignore
+docker-compose.yml

@@ -1,0 +1,26 @@
+# Grapha HTTP graph explorer.
+#
+#   docker compose up --build        # build image and serve ./ at :8080
+#   GRAPHA_TARGET=/path/to/repo docker compose up
+#   GRAPHA_REINDEX=1 docker compose up   # force a re-index on start
+#
+# Mount the repository you want to explore at /workspace. The entrypoint
+# indexes it on first run (writing a .grapha store into the mount) and then
+# serves the graph. Set GRAPHA_REINDEX=1 to rebuild the index on startup.
+services:
+  grapha:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: grapha:latest
+    ports:
+      - "${GRAPHA_PORT:-8080}:8080"
+    volumes:
+      # Repo to analyze. Override with GRAPHA_TARGET; defaults to this repo.
+      - "${GRAPHA_TARGET:-.}:/workspace"
+    environment:
+      GRAPHA_HOST: "0.0.0.0"
+      GRAPHA_PORT: "8080"
+      # Set to any value to re-index on container start.
+      GRAPHA_REINDEX: "${GRAPHA_REINDEX:-}"
+    restart: unless-stopped
