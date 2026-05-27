@@ -39,8 +39,7 @@ fn find_package_dirs(root: &Path) -> Vec<PathBuf> {
     let mut package_dirs: Vec<PathBuf> = walker
         .flatten()
         .filter(|entry| {
-            entry.file_name() == "Package.swift"
-                && entry.file_type().is_some_and(|ft| ft.is_file())
+            entry.file_name() == "Package.swift" && entry.file_type().is_some_and(|ft| ft.is_file())
         })
         .filter_map(|entry| entry.path().parent().map(Path::to_path_buf))
         .collect();
@@ -186,7 +185,11 @@ mod tests {
         // A Package.swift buried inside Cargo's target/ output must be ignored.
         let target_pkg = dir.path().join("target").join("BuildArtifact");
         fs::create_dir_all(&target_pkg).unwrap();
-        fs::write(target_pkg.join("Package.swift"), "// swift-tools-version:5.5").unwrap();
+        fs::write(
+            target_pkg.join("Package.swift"),
+            "// swift-tools-version:5.5",
+        )
+        .unwrap();
 
         let modules = discover_swift_modules(dir.path());
         assert!(modules.modules.contains_key("RealPkg"));
