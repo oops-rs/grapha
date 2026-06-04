@@ -129,6 +129,8 @@ grapha mcp [-p PATH] [--watch[=true|false]]
 - `serve` runs the HTTP graph explorer.
 - `mcp` runs the MCP server over stdio for AI agents. The old `grapha serve --mcp` form remains accepted for compatibility.
 
+Directory inputs use Git-aware discovery: ignored and hidden paths are skipped in Git repositories, while an explicit file path is analyzed even if that file would be ignored during a directory scan.
+
 Remote baseline indexing is described in [docs/plans/2026-05-11-remote-baseline-multiproject-indexing.md](docs/plans/2026-05-11-remote-baseline-multiproject-indexing.md). Local indexes remain authoritative for a checkout; remote default-branch indexes are shared fallback evidence.
 
 ### Symbol Intelligence
