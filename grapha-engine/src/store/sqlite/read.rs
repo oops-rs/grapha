@@ -12,14 +12,34 @@ pub(super) fn load_filtered(
     metadata_key_prefix: Option<&str>,
 ) -> anyhow::Result<Graph> {
     let conn = store.open()?;
-    let schema_version = schema::schema_version(&conn)?;
-    schema::create_tables(&conn)?;
+    load_filtered_from_connection(&conn, edge_kinds, metadata_key_prefix, true)
+}
 
-    let version = load_version(&conn)?;
-    let nodes = load_nodes(&conn, schema_version.as_deref(), metadata_key_prefix)?;
+pub(super) fn load_filtered_read_only(
+    store: &SqliteStore,
+    edge_kinds: Option<&[EdgeKind]>,
+    metadata_key_prefix: Option<&str>,
+) -> anyhow::Result<Graph> {
+    let conn = store.open_read_only()?;
+    load_filtered_from_connection(&conn, edge_kinds, metadata_key_prefix, false)
+}
+
+fn load_filtered_from_connection(
+    conn: &Connection,
+    edge_kinds: Option<&[EdgeKind]>,
+    metadata_key_prefix: Option<&str>,
+    create_missing_tables: bool,
+) -> anyhow::Result<Graph> {
+    let schema_version = schema::schema_version(conn)?;
+    if create_missing_tables {
+        schema::create_tables(conn)?;
+    }
+
+    let version = load_version(conn)?;
+    let nodes = load_nodes(conn, schema_version.as_deref(), metadata_key_prefix)?;
     let (edge_where, edge_kind_params) = build_edge_where(edge_kinds);
     let edges = compat::load_edges(
-        &conn,
+        conn,
         schema_version.as_deref(),
         &edge_where,
         &edge_kind_params,

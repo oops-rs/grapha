@@ -214,9 +214,7 @@ pub fn load_catalog_index(project_root: &Path) -> anyhow::Result<LocalizationCat
     load_catalog_index_from_store(&project_root.join(".grapha"))
 }
 
-pub(crate) fn load_catalog_index_from_store(
-    store_dir: &Path,
-) -> anyhow::Result<LocalizationCatalogIndex> {
+pub fn load_catalog_index_from_store(store_dir: &Path) -> anyhow::Result<LocalizationCatalogIndex> {
     let snapshot = load_catalog_snapshot(store_dir)?;
     Ok(LocalizationCatalogIndex::from_records(snapshot.records))
 }

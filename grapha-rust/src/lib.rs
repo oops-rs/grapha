@@ -13,14 +13,14 @@ pub mod classify {
 mod classifier {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../grapha/src/classify/rust.rs"
+        "/../grapha-engine/src/classify/rust.rs"
     ));
 }
 
 mod extract_impl {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../grapha/src/extract/rust.rs"
+        "/../grapha-engine/src/extract/rust.rs"
     ));
 }
 

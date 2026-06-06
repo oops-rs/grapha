@@ -309,7 +309,7 @@ pub fn load_asset_index(project_root: &Path) -> anyhow::Result<AssetCatalogIndex
     load_asset_index_from_store(&project_root.join(".grapha"))
 }
 
-pub(crate) fn load_asset_index_from_store(store_dir: &Path) -> anyhow::Result<AssetCatalogIndex> {
+pub fn load_asset_index_from_store(store_dir: &Path) -> anyhow::Result<AssetCatalogIndex> {
     let snapshot = load_snapshot(store_dir)?;
     Ok(AssetCatalogIndex::from_records(snapshot.records))
 }

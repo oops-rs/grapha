@@ -96,7 +96,7 @@ pub struct DataflowResult {
     pub total_edges: usize,
     pub summary: DataflowSummary,
     #[serde(skip)]
-    pub(crate) entry_ref: SymbolRef,
+    pub entry_ref: SymbolRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]

@@ -495,7 +495,7 @@ impl SymbolTreeRef {
 }
 
 impl ContextResult {
-    pub(crate) fn apply_annotations(&mut self, graph: &Graph, annotations: &AnnotationIndex) {
+    pub fn apply_annotations(&mut self, graph: &Graph, annotations: &AnnotationIndex) {
         if annotations.is_empty() {
             return;
         }

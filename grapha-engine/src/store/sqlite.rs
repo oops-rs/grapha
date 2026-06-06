@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::store::{Store, StoreWriteStats};
 use grapha_core::graph::{EdgeKind, Graph, NodeKind, Visibility};
@@ -26,6 +26,13 @@ impl SqliteStore {
         let conn = Connection::open(&self.path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         Ok(conn)
+    }
+
+    fn open_read_only(&self) -> anyhow::Result<Connection> {
+        Ok(Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?)
     }
 
     fn open_for_write(&self) -> anyhow::Result<Connection> {
@@ -56,6 +63,10 @@ impl SqliteStore {
         metadata_key_prefix: Option<&str>,
     ) -> anyhow::Result<Graph> {
         read::load_filtered(self, edge_kinds, metadata_key_prefix)
+    }
+
+    pub fn load_read_only(&self) -> anyhow::Result<Graph> {
+        read::load_filtered_read_only(self, None, None)
     }
 }
 

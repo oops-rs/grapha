@@ -54,6 +54,12 @@ impl Recall {
     }
 }
 
+impl Default for Recall {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Extract the trailing symbol name from a query like "File.swift::symbolName" or a full USR.
 fn base_name(query: &str) -> &str {
     // Handle file::symbol syntax

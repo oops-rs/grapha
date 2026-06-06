@@ -318,7 +318,13 @@ fn current_index_store_info(
         return (None, None);
     }
 
+    #[cfg(feature = "swift")]
     let path = grapha_swift::refresh_index_store(project_root);
+    #[cfg(not(feature = "swift"))]
+    let path: Option<PathBuf> = {
+        let _ = project_root;
+        None
+    };
     let stamp = path.as_deref().and_then(FileStamp::from_path);
     let path = path.map(|path| normalize_repo_path(&path));
     (path, stamp)

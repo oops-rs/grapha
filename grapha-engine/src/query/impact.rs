@@ -24,7 +24,7 @@ impl Default for ImpactQueryOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ImpactTreeNode {
+pub struct ImpactTreeNode {
     pub symbol: SymbolRef,
     pub children: Vec<ImpactTreeNode>,
 }
@@ -57,9 +57,9 @@ pub struct ImpactResult {
     pub total_depth_3_plus: usize,
     pub total_affected: usize,
     #[serde(skip)]
-    pub(crate) source_ref: SymbolRef,
+    pub source_ref: SymbolRef,
     #[serde(skip)]
-    pub(crate) tree: ImpactTreeNode,
+    pub tree: ImpactTreeNode,
 }
 
 fn to_symbol_ref(node: &Node) -> SymbolRef {

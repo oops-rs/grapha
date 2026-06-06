@@ -45,7 +45,7 @@ pub struct OriginResult {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
     #[serde(skip)]
-    pub(crate) target_ref: SymbolRef,
+    pub target_ref: SymbolRef,
 }
 
 #[derive(Debug, Clone, Serialize)]

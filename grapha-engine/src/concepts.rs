@@ -583,7 +583,7 @@ pub fn load_concept_index(project_root: &Path) -> anyhow::Result<ConceptIndex> {
     load_concept_index_from_store(&project_root.join(".grapha"))
 }
 
-pub(crate) fn load_concept_index_from_store(store_dir: &Path) -> anyhow::Result<ConceptIndex> {
+pub fn load_concept_index_from_store(store_dir: &Path) -> anyhow::Result<ConceptIndex> {
     let path = snapshot_path(store_dir);
     if !path.exists() {
         return Ok(ConceptIndex::default());
@@ -607,10 +607,7 @@ pub fn save_concept_index(project_root: &Path, index: &ConceptIndex) -> anyhow::
     save_concept_index_to_store(&project_root.join(".grapha"), index)
 }
 
-pub(crate) fn save_concept_index_to_store(
-    store_dir: &Path,
-    index: &ConceptIndex,
-) -> anyhow::Result<()> {
+pub fn save_concept_index_to_store(store_dir: &Path, index: &ConceptIndex) -> anyhow::Result<()> {
     std::fs::create_dir_all(store_dir)
         .with_context(|| format!("failed to create store dir {}", store_dir.display()))?;
     let path = snapshot_path(store_dir);

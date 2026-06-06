@@ -32,7 +32,7 @@ pub struct ReverseResult {
     pub affected_entries: Vec<AffectedEntry>,
     pub total_entries: usize,
     #[serde(skip)]
-    pub(crate) target_ref: SymbolRef,
+    pub target_ref: SymbolRef,
 }
 
 #[derive(Debug, Serialize)]

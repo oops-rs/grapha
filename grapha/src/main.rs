@@ -1,40 +1,9 @@
-mod annotation_sync;
-mod annotations;
 mod app;
-mod assets;
-mod cache;
-mod changes;
-mod classify;
-mod cluster;
-mod compress;
-mod concepts;
-mod config;
-mod data_paths;
-mod delta;
-mod extract;
-mod fields;
-mod filter;
-mod history;
-mod http_client;
-mod index_status;
-mod inferred;
-mod localization;
-mod maintenance;
 mod mcp;
-mod migration;
-mod polyglot_plugin;
-mod progress;
-mod query;
-mod recall;
-mod remote;
 mod render;
-mod rust_plugin;
-mod search;
 mod serve;
-mod snippet;
-mod store;
-mod symbol_locator;
-mod watch;
+
+pub use grapha_engine::*;
 
 use std::path::PathBuf;
 

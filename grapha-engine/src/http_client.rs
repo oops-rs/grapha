@@ -6,14 +6,14 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HttpEndpoint {
+pub struct HttpEndpoint {
     host: String,
     port: u16,
     path_prefix: String,
 }
 
 impl HttpEndpoint {
-    pub(crate) fn parse(raw: &str) -> anyhow::Result<Self> {
+    pub fn parse(raw: &str) -> anyhow::Result<Self> {
         let without_scheme = raw
             .trim()
             .strip_prefix("http://")
@@ -45,12 +45,12 @@ impl HttpEndpoint {
         })
     }
 
-    pub(crate) fn path(&self, path: &str) -> String {
+    pub fn path(&self, path: &str) -> String {
         format!("{}{}", self.path_prefix, path)
     }
 }
 
-pub(crate) fn request(
+pub fn request(
     endpoint: &HttpEndpoint,
     method: &str,
     path: &str,
@@ -87,15 +87,12 @@ pub(crate) fn request(
     Ok(body.to_string())
 }
 
-pub(crate) fn get_json<T: DeserializeOwned>(
-    endpoint: &HttpEndpoint,
-    path: &str,
-) -> anyhow::Result<T> {
+pub fn get_json<T: DeserializeOwned>(endpoint: &HttpEndpoint, path: &str) -> anyhow::Result<T> {
     let body = request(endpoint, "GET", path, None)?;
     Ok(serde_json::from_str(&body)?)
 }
 
-pub(crate) fn post_json<T: DeserializeOwned, P: Serialize>(
+pub fn post_json<T: DeserializeOwned, P: Serialize>(
     endpoint: &HttpEndpoint,
     path: &str,
     payload: &P,

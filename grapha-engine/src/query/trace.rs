@@ -36,7 +36,7 @@ pub struct TraceResult {
     pub total_flows: usize,
     pub summary: TraceSummary,
     #[serde(skip)]
-    pub(crate) entry_ref: SymbolRef,
+    pub entry_ref: SymbolRef,
 }
 
 #[derive(Debug, Serialize)]

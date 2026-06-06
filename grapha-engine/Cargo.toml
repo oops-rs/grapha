@@ -1,35 +1,36 @@
 [package]
-name = "grapha"
+name = "grapha-engine"
 version = "0.4.1"
 edition = "2024"
-description = "Blazingly fast code intelligence CLI and MCP server for Swift, Rust, and best-effort tree-sitter languages"
+publish = false
+description = "Library engine for Grapha code intelligence"
 license = "MIT"
 repository = "https://github.com/oops-rs/grapha"
 homepage = "https://github.com/oops-rs/grapha"
 readme = "../README.md"
-keywords = ["code-intelligence", "mcp", "analysis", "swift", "rust"]
-categories = ["command-line-utilities", "development-tools"]
+keywords = ["code-intelligence", "graph", "analysis", "search", "query"]
+categories = ["development-tools"]
 
 [dependencies]
-grapha-engine = { version = "0.4.1", path = "../grapha-engine", features = ["swift"] }
 grapha-core = { version = "0.4.1", path = "../grapha-core" }
-grapha-swift = { version = "0.4.1", path = "../grapha-swift" }
+grapha-rust = { version = "0.4.1", path = "../grapha-rust" }
+grapha-swift = { version = "0.4.1", path = "../grapha-swift", optional = true }
 anyhow = "1"
 bincode = { version = "2", features = ["serde"] }
+ignore = "0.4"
+indicatif = "0.18"
+git2 = { version = "0.20", default-features = false }
+langcodec = "0.12"
 notify = "8.2"
 notify-debouncer-mini = "0.7"
 rayon = "1"
-clap = { version = "4", features = ["derive"] }
-ignore = "0.4"
+regex = "1"
+rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "2"
-git2 = { version = "0.20", default-features = false }
-rusqlite = { version = "0.39", features = ["bundled"] }
 tantivy = "0.26"
-indicatif = "0.18"
+thiserror = "2"
 toml = "1"
-regex = "1"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 tree-sitter-c = "0.24"
@@ -45,14 +46,12 @@ tree-sitter-php = "0.24"
 tree-sitter-python = "0.25"
 tree-sitter-ruby = "0.23"
 tree-sitter-typescript = "0.23"
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
-tower-http = { version = "0.6", features = ["cors"] }
 urlencoding = "2"
-langcodec = "0.12"
 xcassets = "0.2"
 
 [dev-dependencies]
-assert_cmd = "2"
-predicates = "3"
 tempfile = "3"
+
+[features]
+default = []
+swift = ["dep:grapha-swift"]

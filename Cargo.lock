@@ -747,6 +747,7 @@ dependencies = [
  "clap",
  "git2",
  "grapha-core",
+ "grapha-engine",
  "grapha-swift",
  "ignore",
  "indicatif",
@@ -796,6 +797,49 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tree-sitter",
+]
+
+[[package]]
+name = "grapha-engine"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "git2",
+ "grapha-core",
+ "grapha-rust",
+ "grapha-swift",
+ "ignore",
+ "indicatif",
+ "langcodec",
+ "notify",
+ "notify-debouncer-mini",
+ "rayon",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tantivy",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-dart",
+ "tree-sitter-go",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-kotlin-ng",
+ "tree-sitter-pascal",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+ "urlencoding",
+ "xcassets",
 ]
 
 [[package]]
