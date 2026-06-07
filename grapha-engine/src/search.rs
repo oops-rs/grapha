@@ -4,7 +4,7 @@ use anyhow::Result;
 use regex::Regex;
 use serde::Serialize;
 use tantivy::collector::{Count, TopDocs};
-use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
+use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{IndexRecordOption, STORED, STRING, Schema, TEXT, Value};
 use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 
@@ -15,6 +15,9 @@ use crate::snippet::compact_symbol_snippet;
 use crate::symbol_locator::SymbolLocatorIndex;
 use grapha_core::graph::{EdgeKind, Graph};
 use grapha_core::graph::{Node, NodeRole};
+
+const SEARCH_TERMS_COMPLETE_MATCH_BOOST: f32 = 2.0;
+const SEARCH_TERMS_RELAXED_MATCH_BOOST: f32 = 1.5;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
@@ -173,6 +176,7 @@ fn node_document(fields: SearchFields, node: &Node, locator: &str) -> Result<Tan
                 locator,
                 &node.file.to_string_lossy(),
                 node.doc_comment.as_deref(),
+                node.snippet.as_deref(),
             ),
         );
     }
@@ -370,12 +374,21 @@ fn tokenize_search_terms(input: &str) -> Vec<String> {
     tokens
 }
 
-fn search_terms_text(name: &str, locator: &str, file: &str, doc_comment: Option<&str>) -> String {
+fn search_terms_text(
+    name: &str,
+    locator: &str,
+    file: &str,
+    doc_comment: Option<&str>,
+    snippet: Option<&str>,
+) -> String {
     let mut tokens = tokenize_search_terms(name);
     tokens.extend(tokenize_search_terms(locator));
     tokens.extend(tokenize_search_terms(file));
     if let Some(doc_comment) = doc_comment {
         tokens.extend(tokenize_search_terms(doc_comment));
+    }
+    if let Some(snippet) = snippet {
+        tokens.extend(tokenize_search_terms(snippet));
     }
     tokens.sort();
     tokens.dedup();
@@ -389,28 +402,57 @@ fn identifier_like_query(query: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
 }
 
-fn search_terms_query(
-    fields: SearchFields,
-    query_str: &str,
-) -> Option<Box<dyn tantivy::query::Query>> {
+fn search_terms_complete_query(fields: SearchFields, query_str: &str) -> Option<Box<dyn Query>> {
     let search_terms_field = fields.search_terms?;
     let terms = tokenize_search_terms(query_str);
     if terms.is_empty() {
         return None;
     }
 
-    let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
+    let clauses: Vec<(Occur, Box<dyn Query>)> = terms
         .into_iter()
         .map(|term| {
             let term = Term::from_field_text(search_terms_field, &term);
             (
                 Occur::Must,
-                Box::new(TermQuery::new(term, IndexRecordOption::Basic))
-                    as Box<dyn tantivy::query::Query>,
+                Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>,
             )
         })
         .collect();
     Some(Box::new(BooleanQuery::new(clauses)))
+}
+
+fn search_terms_relaxed_query(fields: SearchFields, query_str: &str) -> Option<Box<dyn Query>> {
+    let search_terms_field = fields.search_terms?;
+    let terms = tokenize_search_terms(query_str);
+    if terms.len() < 2 {
+        return None;
+    }
+
+    let minimum_required = search_terms_minimum_should_match(terms.len());
+    let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+        .into_iter()
+        .map(|term| {
+            let term = Term::from_field_text(search_terms_field, &term);
+            (
+                Occur::Should,
+                Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>,
+            )
+        })
+        .collect();
+    Some(Box::new(BooleanQuery::with_minimum_required_clauses(
+        clauses,
+        minimum_required,
+    )))
+}
+
+fn search_terms_minimum_should_match(term_count: usize) -> usize {
+    match term_count {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => (term_count * 2).div_ceil(3),
+    }
 }
 
 fn requires_full_rebuild_for_locators(previous: &Graph, delta: &GraphDelta<'_>) -> bool {
@@ -544,16 +586,29 @@ pub fn search_filtered(
     } else {
         let query_parser =
             QueryParser::for_index(index, vec![fields.name, fields.locator, fields.file]);
-        let exact_query =
-            Box::new(query_parser.parse_query(query_str)?) as Box<dyn tantivy::query::Query>;
-        if let Some(token_query) = search_terms_query(fields, query_str) {
-            Box::new(BooleanQuery::new(vec![
-                (Occur::Should, exact_query),
-                (Occur::Should, token_query),
-            ]))
-        } else {
-            exact_query
+        let exact_query = Box::new(query_parser.parse_query(query_str)?) as Box<dyn Query>;
+        let mut query_clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Should, exact_query)];
+        if let Some(token_query) = search_terms_complete_query(fields, query_str) {
+            query_clauses.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(
+                    token_query,
+                    SEARCH_TERMS_COMPLETE_MATCH_BOOST,
+                )),
+            ));
         }
+        if !identifier_like_query(query_str)
+            && let Some(token_query) = search_terms_relaxed_query(fields, query_str)
+        {
+            query_clauses.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(
+                    token_query,
+                    SEARCH_TERMS_RELAXED_MATCH_BOOST,
+                )),
+            ));
+        }
+        Box::new(BooleanQuery::new(query_clauses))
     };
 
     let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = vec![(Occur::Must, text_query)];
@@ -1598,6 +1653,114 @@ mod tests {
             results
                 .iter()
                 .map(|result| &result.name)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn search_matches_snippet_terms() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = make_rich_test_graph();
+        graph.nodes[2].snippet =
+            Some("fn render() { filter_search_results_by_current_scope(); }".into());
+        let index = build_index(&graph, dir.path()).unwrap();
+
+        let results = search_filtered(
+            &index,
+            "filter search results scope",
+            10,
+            &SearchOptions::default(),
+        )
+        .unwrap();
+
+        assert!(
+            results.iter().any(|result| result.name == "Config"),
+            "body/snippet terms should find the symbol, got: {:?}",
+            results
+                .iter()
+                .map(|result| &result.name)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn natural_language_search_prefers_high_coverage_doc_comment_over_token_noise() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |id: String, name: String, file: String, doc_comment: Option<String>| Node {
+            id,
+            kind: NodeKind::Function,
+            name,
+            file: file.into(),
+            span: Span {
+                start: [0, 0],
+                end: [1, 0],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment,
+            module: Some("Search".into()),
+            snippet: None,
+            repo: None,
+        };
+        let mut nodes = Vec::new();
+        for index in 0..30 {
+            nodes.push(mk(
+                format!("noise::search_results_{index}"),
+                format!("search_results_{index}"),
+                format!("src/search_results_{index}.rs"),
+                None,
+            ));
+            nodes.push(mk(
+                format!("noise::scope_filter_{index}"),
+                format!("scope_filter_{index}"),
+                format!("src/scope_filter_{index}.rs"),
+                None,
+            ));
+        }
+        nodes.push(mk(
+            "target::chunk_in_scope".into(),
+            "chunk_in_scope".into(),
+            "src/chunks.rs".into(),
+            Some("Filters search results to the active scope before ranking chunks.".into()),
+        ));
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes,
+            edges: vec![],
+        };
+        let index = build_index(&graph, dir.path()).unwrap();
+
+        let natural_results = search_filtered(
+            &index,
+            "filters search results by scope",
+            10,
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            natural_results
+                .iter()
+                .any(|result| result.name == "chunk_in_scope"),
+            "doc-comment behavior phrase should rank within the default limit, got: {:?}",
+            natural_results
+                .iter()
+                .map(|result| (&result.name, result.score))
+                .collect::<Vec<_>>()
+        );
+
+        let identifier_results =
+            search_filtered(&index, "chunk_in_scope", 10, &SearchOptions::default()).unwrap();
+        assert_eq!(
+            identifier_results
+                .first()
+                .map(|result| result.name.as_str()),
+            Some("chunk_in_scope"),
+            "exact identifier search should still prefer the target, got: {:?}",
+            identifier_results
+                .iter()
+                .map(|result| (&result.name, result.score))
                 .collect::<Vec<_>>()
         );
     }
