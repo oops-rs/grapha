@@ -18,6 +18,7 @@ use grapha_core::graph::{Node, NodeRole};
 
 const SEARCH_TERMS_COMPLETE_MATCH_BOOST: f32 = 2.0;
 const SEARCH_TERMS_RELAXED_MATCH_BOOST: f32 = 1.5;
+const EXACT_NAME_MATCH_BOOST: f32 = 20.0;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
@@ -455,6 +456,16 @@ fn search_terms_minimum_should_match(term_count: usize) -> usize {
     }
 }
 
+fn exact_name_query(fields: SearchFields, query_str: &str) -> Option<Box<dyn Query>> {
+    let query_name = normalized_exact_name(query_str);
+    if query_name.is_empty() {
+        return None;
+    }
+
+    let term = Term::from_field_text(fields.name_lower, &query_name);
+    Some(Box::new(TermQuery::new(term, IndexRecordOption::Basic)))
+}
+
 fn requires_full_rebuild_for_locators(previous: &Graph, delta: &GraphDelta<'_>) -> bool {
     if delta
         .added_edges
@@ -588,17 +599,27 @@ pub fn search_filtered(
             QueryParser::for_index(index, vec![fields.name, fields.locator, fields.file]);
         let exact_query = Box::new(query_parser.parse_query(query_str)?) as Box<dyn Query>;
         let mut query_clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Should, exact_query)];
-        if let Some(token_query) = search_terms_complete_query(fields, query_str) {
+        let identifier_like = identifier_like_query(query_str);
+        if identifier_like && let Some(name_query) = exact_name_query(fields, query_str) {
             query_clauses.push((
                 Occur::Should,
-                Box::new(BoostQuery::new(
-                    token_query,
-                    SEARCH_TERMS_COMPLETE_MATCH_BOOST,
-                )),
+                Box::new(BoostQuery::new(name_query, EXACT_NAME_MATCH_BOOST)),
             ));
         }
-        if !identifier_like_query(query_str)
-            && let Some(token_query) = search_terms_relaxed_query(fields, query_str)
+        if let Some(token_query) = search_terms_complete_query(fields, query_str) {
+            if identifier_like {
+                query_clauses.push((Occur::Should, token_query));
+            } else {
+                query_clauses.push((
+                    Occur::Should,
+                    Box::new(BoostQuery::new(
+                        token_query,
+                        SEARCH_TERMS_COMPLETE_MATCH_BOOST,
+                    )),
+                ));
+            }
+        }
+        if !identifier_like && let Some(token_query) = search_terms_relaxed_query(fields, query_str)
         {
             query_clauses.push((
                 Occur::Should,
@@ -1759,6 +1780,101 @@ mod tests {
             Some("chunk_in_scope"),
             "exact identifier search should still prefer the target, got: {:?}",
             identifier_results
+                .iter()
+                .map(|result| (&result.name, result.score))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn identifier_search_keeps_exact_name_ahead_of_conceptual_docstore_family() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |id: String,
+                  name: String,
+                  kind: NodeKind,
+                  file: String,
+                  doc_comment: Option<String>| Node {
+            id,
+            kind,
+            name,
+            file: file.into(),
+            span: Span {
+                start: [0, 0],
+                end: [1, 0],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment,
+            module: Some("Storage".into()),
+            snippet: None,
+            repo: None,
+        };
+        let mut nodes = vec![mk(
+            "storage::DocStore".into(),
+            "DocStore".into(),
+            NodeKind::Trait,
+            "src/storage/store.rs".into(),
+            None,
+        )];
+        for index in 0..30 {
+            nodes.push(mk(
+                format!("storage::sqlite_docstore_{index}"),
+                format!("impl DocStore for SqliteDocStore{index}"),
+                NodeKind::Impl,
+                "src/storage/docstore.rs".into(),
+                Some("Persists document chunks into SQLite storage.".into()),
+            ));
+        }
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes,
+            edges: vec![],
+        };
+        let index = build_index(&graph, dir.path()).unwrap();
+
+        let identifier_results =
+            search_filtered(&index, "DocStore", 10, &SearchOptions::default()).unwrap();
+        let exact_rank = identifier_results
+            .iter()
+            .position(|result| result.name == "DocStore");
+        assert!(
+            exact_rank.is_some_and(|rank| rank < 3),
+            "exact DocStore symbol should rank in the top 3, got: {:?}",
+            identifier_results
+                .iter()
+                .map(|result| (&result.name, result.score))
+                .collect::<Vec<_>>()
+        );
+
+        let lowercase_identifier_results =
+            search_filtered(&index, "docstore", 10, &SearchOptions::default()).unwrap();
+        let lowercase_exact_rank = lowercase_identifier_results
+            .iter()
+            .position(|result| result.name == "DocStore");
+        assert!(
+            lowercase_exact_rank.is_some_and(|rank| rank < 3),
+            "case-insensitive exact DocStore match should rank in the top 3, got: {:?}",
+            lowercase_identifier_results
+                .iter()
+                .map(|result| (&result.name, result.score))
+                .collect::<Vec<_>>()
+        );
+
+        let conceptual_results = search_filtered(
+            &index,
+            "persists document chunks into sqlite",
+            10,
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            conceptual_results
+                .iter()
+                .any(|result| result.name.contains("SqliteDocStore")),
+            "conceptual phrase should still surface the behaviorally relevant store, got: {:?}",
+            conceptual_results
                 .iter()
                 .map(|result| (&result.name, result.score))
                 .collect::<Vec<_>>()
