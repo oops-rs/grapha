@@ -137,6 +137,39 @@ fn empty_directory_produces_empty_graph() {
 }
 
 #[test]
+fn index_empty_directory_does_not_create_store() {
+    let dir = tempfile::tempdir().unwrap();
+
+    grapha()
+        .args(["index", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "no graph content produced, skipping index store creation",
+        ));
+
+    assert!(!dir.path().join(".grapha").exists());
+}
+
+#[test]
+fn index_empty_directory_does_not_populate_empty_store_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::create_dir(&store_dir).unwrap();
+
+    grapha()
+        .args(["index", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "no graph content produced, skipping index store creation",
+        ));
+
+    assert!(!store_dir.join("grapha.db").exists());
+    assert!(!store_dir.join("search_index").exists());
+}
+
+#[test]
 fn analyzes_swift_file() {
     grapha()
         .args(["analyze", "tests/fixtures/simple.swift"])

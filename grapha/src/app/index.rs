@@ -315,6 +315,17 @@ pub(crate) fn handle_index(
     )?;
     let graph = pipeline.graph;
 
+    let has_existing_graph_store = store_file_path(&format, &store_path)?.exists();
+    if graph.nodes.is_empty() && graph.edges.is_empty() && !has_existing_graph_store {
+        if show_progress {
+            progress::done_elapsed(
+                "no graph content produced, skipping index store creation",
+                total_start.elapsed(),
+            );
+        }
+        return Ok(());
+    }
+
     std::fs::create_dir_all(&store_path)
         .with_context(|| format!("failed to create store dir {}", store_path.display()))?;
 
