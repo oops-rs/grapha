@@ -7,8 +7,8 @@ use grapha_core::Classifier;
 
 use crate::store::Store;
 use crate::{
-    cache, classify, config, http_client, polyglot_plugin, progress, remote, rust_plugin, snippet,
-    store,
+    cache, cargo_manifest, classify, config, http_client, polyglot_plugin, progress, remote,
+    rust_plugin, snippet, store,
 };
 
 pub struct PipelineOutput {
@@ -256,6 +256,11 @@ fn external_source_path(ext: &config::ExternalRepo) -> Option<PathBuf> {
         .filter(|path| path.exists())
 }
 
+fn manifest_dependency_result(project_root: &Path) -> Option<grapha_core::ExtractionResult> {
+    let result = cargo_manifest::extract_dependency_graph(project_root);
+    (!result.nodes.is_empty() || !result.edges.is_empty()).then_some(result)
+}
+
 fn apply_config_classifier_semantics(
     document: &mut grapha_core::SemanticDocument,
     rules: &[config::ClassifierRule],
@@ -322,6 +327,14 @@ pub fn run_pipeline(
     let primary_file_count = indexed_files.len();
     let mut external_repo_count = 0usize;
     let mut external_seed_results = Vec::new();
+    if let Some(result) = manifest_dependency_result(&project_context.project_root) {
+        external_seed_results.push(stamp_repo(
+            result,
+            &primary_repo,
+            false,
+            &EvidenceMetadata::local_precise(),
+        ));
+    }
     let mut external_source_contexts = Vec::new();
     for ext in &cfg.external {
         match load_external_index_result(ext) {
@@ -369,6 +382,14 @@ pub fn run_pipeline(
         ext_context.index_store_enabled = cfg.swift.index_store;
         match grapha_core::pipeline::discover_files(&ext_path, &registry) {
             Ok(ext_discovered) => {
+                if let Some(result) = manifest_dependency_result(&ext_path) {
+                    external_seed_results.push(stamp_repo(
+                        result,
+                        &ext.name,
+                        true,
+                        &EvidenceMetadata::local_precise(),
+                    ));
+                }
                 indexed_files.extend(ext_discovered.into_iter().map(|file| IndexedInputFile {
                     path: file,
                     repo_name: ext.name.clone(),

@@ -74,6 +74,7 @@ fn is_resolvable_symbol_kind(kind: NodeKind) -> bool {
         NodeKind::File
             | NodeKind::Import
             | NodeKind::Export
+            | NodeKind::Package
             | NodeKind::Parameter
             | NodeKind::View
             | NodeKind::Branch

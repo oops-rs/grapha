@@ -52,39 +52,21 @@ fn discover_cargo_modules(root: &Path) -> ModuleMap {
         return ModuleMap::new();
     }
 
-    let content = match std::fs::read_to_string(&cargo_toml) {
-        Ok(content) => content,
-        Err(_) => return ModuleMap::new(),
-    };
-    let parsed = match content.parse::<toml::Table>() {
+    let parsed = match crate::cargo_manifest::read_manifest_table(&cargo_toml) {
         Ok(table) => table,
         Err(_) => return ModuleMap::new(),
     };
 
     let mut modules = ModuleMap::new();
-    if let Some(workspace) = parsed
-        .get("workspace")
-        .and_then(|workspace| workspace.as_table())
-    {
-        if let Some(members) = workspace
-            .get("members")
-            .and_then(|members| members.as_array())
-        {
-            for member in members {
-                if let Some(pattern) = member.as_str() {
-                    expand_workspace_member(root, pattern, &mut modules);
-                }
+    let workspace_members = crate::cargo_manifest::workspace_member_paths_from_table(root, &parsed);
+    if !workspace_members.is_empty() {
+        for member_path in workspace_members {
+            if member_path.is_dir() {
+                add_cargo_member(&member_path, &mut modules);
             }
         }
     } else {
-        let name = parsed
-            .get("package")
-            .and_then(|package| package.as_table())
-            .and_then(|package| package.get("name"))
-            .and_then(|name| name.as_str())
-            .or_else(|| root.file_name().and_then(|name| name.to_str()))
-            .unwrap_or("root")
-            .to_string();
+        let name = crate::cargo_manifest::package_name_from_table(&parsed, root);
         let src_dir = root.join("src");
         let source_dir = if src_dir.is_dir() {
             src_dir
@@ -97,34 +79,18 @@ fn discover_cargo_modules(root: &Path) -> ModuleMap {
     modules
 }
 
-fn expand_workspace_member(root: &Path, pattern: &str, modules: &mut ModuleMap) {
-    if pattern.contains('*') {
-        let prefix = pattern.trim_end_matches('*').trim_end_matches('/');
-        let parent_dir = root.join(prefix);
-        if parent_dir.is_dir()
-            && let Ok(entries) = std::fs::read_dir(&parent_dir)
-        {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    add_cargo_member(&path, modules);
-                }
-            }
-        }
-    } else {
-        let member_path = root.join(pattern);
-        if member_path.is_dir() {
-            add_cargo_member(&member_path, modules);
-        }
-    }
-}
-
 fn add_cargo_member(member_path: &Path, modules: &mut ModuleMap) {
-    let name = member_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let manifest = member_path.join("Cargo.toml");
+    let name = crate::cargo_manifest::read_manifest_table(&manifest)
+        .ok()
+        .map(|table| crate::cargo_manifest::package_name_from_table(&table, member_path))
+        .unwrap_or_else(|| {
+            member_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        });
     let src_dir = member_path.join("src");
     let source_dir = if src_dir.is_dir() {
         src_dir

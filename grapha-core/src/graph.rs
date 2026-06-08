@@ -25,6 +25,7 @@ pub enum NodeKind {
     Parameter,
     Import,
     Export,
+    Package,
     Route,
     Component,
     Protocol,  // Swift protocols
@@ -55,6 +56,7 @@ pub enum EdgeKind {
     Writes,
     Publishes,
     Subscribes,
+    DependsOn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -186,6 +188,9 @@ mod tests {
 
         let json = serde_json::to_string(&NodeKind::Struct).unwrap();
         assert_eq!(json, "\"struct\"");
+
+        let json = serde_json::to_string(&NodeKind::Package).unwrap();
+        assert_eq!(json, "\"package\"");
     }
 
     #[test]
@@ -198,6 +203,9 @@ mod tests {
 
         let json = serde_json::to_string(&EdgeKind::Imports).unwrap();
         assert_eq!(json, "\"imports\"");
+
+        let json = serde_json::to_string(&EdgeKind::DependsOn).unwrap();
+        assert_eq!(json, "\"depends_on\"");
     }
 
     #[test]

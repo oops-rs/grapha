@@ -93,6 +93,7 @@ pub(super) fn node_kind_str(k: &NodeKind) -> &'static str {
         NodeKind::Parameter => "parameter",
         NodeKind::Import => "import",
         NodeKind::Export => "export",
+        NodeKind::Package => "package",
         NodeKind::Route => "route",
         NodeKind::Component => "component",
         NodeKind::Protocol => "protocol",
@@ -123,6 +124,7 @@ pub(super) fn edge_kind_str(k: &EdgeKind) -> &'static str {
         grapha_core::graph::EdgeKind::Writes => "writes",
         grapha_core::graph::EdgeKind::Publishes => "publishes",
         grapha_core::graph::EdgeKind::Subscribes => "subscribes",
+        grapha_core::graph::EdgeKind::DependsOn => "depends_on",
     }
 }
 

@@ -767,6 +767,15 @@ enum RepoCommands {
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
     },
+    /// List Cargo manifest dependency declarations from the indexed graph
+    Deps {
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        /// Filter by declared dependency key or renamed package name
+        #[arg(long = "crate")]
+        crate_name: Option<String>,
+    },
     /// Detect code changes and analyze their impact
     Changes {
         /// Scope: "unstaged", "staged", "all", or a git ref (e.g., "main")

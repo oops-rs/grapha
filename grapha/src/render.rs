@@ -783,6 +783,7 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::Writes => "writes",
         EdgeKind::Publishes => "publishes",
         EdgeKind::Subscribes => "subscribes",
+        EdgeKind::DependsOn => "depends_on",
     }
 }
 

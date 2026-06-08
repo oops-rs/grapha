@@ -119,7 +119,8 @@ pub fn group(graph: &Graph) -> GroupedGraph {
                     EdgeKind::Uses
                     | EdgeKind::Imports
                     | EdgeKind::Exports
-                    | EdgeKind::Decorates => {}
+                    | EdgeKind::Decorates
+                    | EdgeKind::DependsOn => {}
                 }
             }
         }

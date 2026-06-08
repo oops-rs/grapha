@@ -2,6 +2,7 @@ pub mod annotation_sync;
 pub mod annotations;
 pub mod assets;
 pub mod cache;
+pub mod cargo_manifest;
 pub mod changes;
 pub mod classify;
 pub mod cluster;

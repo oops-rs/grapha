@@ -330,6 +330,66 @@ fn symbol_files_batches_file_symbol_maps() {
 }
 
 #[test]
+fn repo_deps_reports_manifest_dependency_without_source_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "app"
+
+[dependencies]
+mentra = { version = "0.7", path = "../mentra" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = grapha()
+        .args([
+            "repo",
+            "deps",
+            "--crate",
+            "mentra",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["total"], 1);
+    let dependency = &parsed["dependencies"][0];
+    assert_eq!(dependency["package"], "app");
+    assert_eq!(dependency["manifest"], "Cargo.toml");
+    assert_eq!(dependency["name"], "mentra");
+    assert_eq!(dependency["version_req"], "0.7");
+    assert_eq!(dependency["source"], "path");
+    assert_eq!(dependency["source_detail"], "../mentra");
+    assert_eq!(dependency["kind"], "normal");
+    assert!(
+        dependency["dependency_id"]
+            .as_str()
+            .is_some_and(|id| id.contains("Cargo.toml"))
+    );
+}
+
+#[test]
 fn symbol_api_lists_impl_members() {
     let dir = tempfile::tempdir().unwrap();
     let store_dir = dir.path().join(".grapha");

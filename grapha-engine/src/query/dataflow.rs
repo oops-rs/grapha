@@ -157,7 +157,8 @@ fn edge_kind_label(kind: EdgeKind) -> &'static str {
         | EdgeKind::Extends
         | EdgeKind::Instantiates
         | EdgeKind::Overrides
-        | EdgeKind::Decorates => "effect",
+        | EdgeKind::Decorates
+        | EdgeKind::DependsOn => "effect",
     }
 }
 
@@ -186,7 +187,8 @@ fn semantic_edge_kinds(edge: &Edge) -> Vec<DataflowEdgeKind> {
             | EdgeKind::Inherits
             | EdgeKind::Extends
             | EdgeKind::Overrides
-            | EdgeKind::Decorates => Vec::new(),
+            | EdgeKind::Decorates
+            | EdgeKind::DependsOn => Vec::new(),
         },
     }
 }
@@ -572,7 +574,8 @@ pub fn query_dataflow_with_options(
                     | EdgeKind::Extends
                     | EdgeKind::Instantiates
                     | EdgeKind::Overrides
-                    | EdgeKind::Decorates => {}
+                    | EdgeKind::Decorates
+                    | EdgeKind::DependsOn => {}
                 }
             }
         }

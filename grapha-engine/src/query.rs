@@ -3,6 +3,7 @@ pub mod arch;
 pub mod complexity;
 pub mod context;
 pub mod dataflow;
+pub mod deps;
 pub mod entries;
 pub mod file_symbols;
 pub(crate) mod flow;
@@ -132,7 +133,11 @@ fn kind_preference(kind: NodeKind) -> usize {
         | NodeKind::Constant
         | NodeKind::TypeAlias
         | NodeKind::Protocol => 3,
-        NodeKind::Impl | NodeKind::Extension | NodeKind::Import | NodeKind::Export => 4,
+        NodeKind::Impl
+        | NodeKind::Extension
+        | NodeKind::Import
+        | NodeKind::Export
+        | NodeKind::Package => 4,
         NodeKind::File | NodeKind::Component | NodeKind::View | NodeKind::Branch => 5,
     }
 }

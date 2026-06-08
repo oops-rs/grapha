@@ -125,6 +125,7 @@ fn edge_kind_tag(kind: EdgeKind) -> &'static str {
         EdgeKind::Writes => "writes",
         EdgeKind::Publishes => "publishes",
         EdgeKind::Subscribes => "subscribes",
+        EdgeKind::DependsOn => "depends_on",
     }
 }
 

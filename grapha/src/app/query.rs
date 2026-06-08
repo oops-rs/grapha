@@ -1098,6 +1098,14 @@ pub(crate) fn handle_repo_command(command: crate::RepoCommands) -> anyhow::Resul
             let status = crate::index_status::load_index_status(&path, &path.join(".grapha"))?;
             print_json(&status)
         }
+        crate::RepoCommands::Deps { path, crate_name } => {
+            let graph = load_graph(&path)?;
+            let report = query::deps::query_dependencies(
+                &graph,
+                &query::deps::DependencyQueryOptions { name: crate_name },
+            );
+            print_json(&report)
+        }
         crate::RepoCommands::Changes {
             scope,
             path,
