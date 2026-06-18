@@ -22,6 +22,7 @@ pub mod index_status;
 pub mod inferred;
 pub mod localization;
 pub mod maintenance;
+pub mod manifest;
 pub mod merge;
 pub mod migration;
 pub mod module;

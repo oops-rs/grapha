@@ -22,6 +22,13 @@ struct IndexedRepoFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexedRepoState {
+    /// Repo workdir, stored relative to the index root so the persisted
+    /// `index_status.json` is portable (a copied/moved `.grapha` carries no
+    /// absolute host paths). Legacy snapshots stored an absolute path here;
+    /// see [`resolve_repo_root`] for the read-time resolution that keeps both
+    /// shapes working. When the repo root cannot be expressed relative to the
+    /// index root (e.g. it lives outside it), this is `"."` and the live
+    /// `project_root` supplies the absolute path at read time.
     root: String,
     head_oid: Option<String>,
     head_ref: Option<String>,
@@ -123,6 +130,72 @@ impl IndexWorkPlan {
 
 fn normalize_repo_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+/// The index root that a `.grapha` store sits under (its parent directory).
+/// Repo paths are persisted relative to this so the artifact is portable.
+fn index_root_for_store(store_dir: &Path) -> PathBuf {
+    store_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| store_dir.to_path_buf())
+}
+
+/// Express `repo_root` relative to the index root for portable storage.
+///
+/// Returns `"."` when the repo root is the index root, a forward-slashed
+/// relative path when it is an ancestor of the index root (e.g. the index
+/// lives in a subdirectory of the repo), and `"."` as a conservative fallback
+/// when no relative expression is possible. The absolute path is never
+/// persisted, so a copied/moved `.grapha` stays host-independent.
+fn relativize_repo_root(repo_root: &Path, store_dir: &Path) -> String {
+    let index_root = index_root_for_store(store_dir);
+    let repo_root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let index_root = index_root.canonicalize().unwrap_or(index_root);
+
+    if repo_root == index_root {
+        return ".".to_string();
+    }
+    if let Ok(suffix) = index_root.strip_prefix(&repo_root) {
+        // Index root is nested inside the repo: walk up from it.
+        let ups = suffix.components().count();
+        let mut rel = PathBuf::new();
+        for _ in 0..ups {
+            rel.push("..");
+        }
+        if rel.as_os_str().is_empty() {
+            return ".".to_string();
+        }
+        return normalize_repo_path(&rel);
+    }
+    if let Ok(suffix) = repo_root.strip_prefix(&index_root) {
+        // Repo root is nested inside the index root.
+        if suffix.as_os_str().is_empty() {
+            return ".".to_string();
+        }
+        return normalize_repo_path(suffix);
+    }
+    ".".to_string()
+}
+
+/// Resolve a persisted repo `root` back to an absolute path at read time.
+///
+/// Legacy snapshots stored an absolute path; new snapshots store a path
+/// relative to the index root. Absolute stored values are returned as-is;
+/// relative values are resolved against the live `project_root`, so a moved
+/// `.grapha` reports the host where it is now opened rather than where it was
+/// produced.
+fn resolve_repo_root(stored: &str, project_root: &Path) -> String {
+    let stored_path = Path::new(stored);
+    if stored_path.is_absolute() {
+        return stored.to_string();
+    }
+    let index_root = project_root.to_path_buf();
+    let resolved = index_root.join(stored_path);
+    let resolved = resolved.canonicalize().unwrap_or(resolved);
+    normalize_repo_path(&resolved)
 }
 
 fn is_store_artifact(path: &Path) -> bool {
@@ -282,7 +355,10 @@ fn dirty_repo_files(repo: &Repository) -> anyhow::Result<Vec<IndexedRepoFile>> {
     Ok(files.into_values().collect())
 }
 
-fn capture_repo_state(project_root: &Path) -> anyhow::Result<Option<IndexedRepoState>> {
+fn capture_repo_state(
+    project_root: &Path,
+    store_dir: &Path,
+) -> anyhow::Result<Option<IndexedRepoState>> {
     let repo = match Repository::discover(project_root) {
         Ok(repo) => repo,
         Err(_) => return Ok(None),
@@ -292,7 +368,7 @@ fn capture_repo_state(project_root: &Path) -> anyhow::Result<Option<IndexedRepoS
     };
     let (head_oid, head_ref) = head_state(&repo);
     Ok(Some(IndexedRepoState {
-        root: normalize_repo_path(&root),
+        root: relativize_repo_root(&root, store_dir),
         head_oid,
         head_ref,
         dirty_files: dirty_repo_files(&repo)?,
@@ -516,7 +592,7 @@ fn compute_status(
                 }
 
                 Some(RepoStatus {
-                    root: indexed_repo.root.clone(),
+                    root: resolve_repo_root(&indexed_repo.root, project_root),
                     indexed_head_oid: indexed_repo.head_oid.clone(),
                     current_head_oid,
                     indexed_head_ref: indexed_repo.head_ref.clone(),
@@ -526,7 +602,7 @@ fn compute_status(
                 })
             }
             Err(_) => Some(RepoStatus {
-                root: indexed_repo.root.clone(),
+                root: resolve_repo_root(&indexed_repo.root, project_root),
                 indexed_head_oid: indexed_repo.head_oid.clone(),
                 current_head_oid: None,
                 indexed_head_ref: indexed_repo.head_ref.clone(),
@@ -596,7 +672,7 @@ pub fn save_index_status(
         config_fingerprint: config.index_input_fingerprint(),
         index_store_path,
         index_store_stamp,
-        repo: capture_repo_state(project_root)?,
+        repo: capture_repo_state(project_root, store_dir)?,
         borrowed_from: None,
     };
     save_snapshot(store_dir, &snapshot)
@@ -633,7 +709,7 @@ pub fn save_borrowed_index_status(
         .and_then(|snapshot| snapshot.repo.clone())
     {
         Some(repo) => Some(repo),
-        None => capture_repo_state(source_project_root)?,
+        None => capture_repo_state(source_project_root, store_dir)?,
     };
 
     let snapshot = IndexStatusSnapshot {
@@ -797,6 +873,183 @@ mod tests {
         assert!(!status.may_be_stale);
         assert_eq!(status.changed_file_count_since_index, 0);
         assert_eq!(status.changed_input_file_count_since_index, 0);
+    }
+
+    #[test]
+    fn index_status_json_carries_no_absolute_repo_root() {
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("src.rs"), "fn main() {}\n").unwrap();
+        commit_all(&repo, "initial").unwrap();
+
+        let store_dir = dir.path().join(".grapha");
+        save_index_status(dir.path(), &store_dir, 1, 0, &GraphaConfig::default()).unwrap();
+
+        let raw = fs::read_to_string(status_path(&store_dir)).unwrap();
+        let absolute = normalize_repo_path(&dir.path().canonicalize().unwrap());
+        assert!(
+            !raw.contains(&absolute),
+            "portable index_status.json must not embed the absolute repo root: {raw}"
+        );
+        // The persisted repo root is relative to the index root.
+        let snapshot = load_snapshot(&store_dir).unwrap();
+        let stored = snapshot.repo.unwrap().root;
+        assert!(
+            !Path::new(&stored).is_absolute(),
+            "stored repo root should be relative, got {stored}"
+        );
+    }
+
+    #[test]
+    fn copied_grapha_opens_read_only_after_move() {
+        // Produce an index in one location, then copy the source tree + .grapha
+        // to a different absolute path and confirm the status still resolves
+        // against the new location (portability of the artifact).
+        let origin = tempdir().unwrap();
+        let repo = Repository::init(origin.path()).unwrap();
+        fs::write(origin.path().join("src.rs"), "fn main() {}\n").unwrap();
+        commit_all(&repo, "initial").unwrap();
+
+        let origin_store = origin.path().join(".grapha");
+        save_index_status(origin.path(), &origin_store, 1, 0, &GraphaConfig::default()).unwrap();
+
+        // Move: copy the whole tree (source + .grapha) to a new root.
+        let moved = tempdir().unwrap();
+        let moved_root = moved.path().join("relocated");
+        copy_dir_all(origin.path(), &moved_root).unwrap();
+        let moved_store = moved_root.join(".grapha");
+
+        // The status loads and reports the *new* root, proving no stale
+        // absolute path from the producing host leaked into the artifact.
+        let status = load_index_status(&moved_root, &moved_store).unwrap();
+        let reported_root = status.repo.expect("repo status present").root;
+        let expected = normalize_repo_path(&moved_root.canonicalize().unwrap());
+        assert_eq!(reported_root, expected);
+        assert!(
+            !reported_root.contains(&normalize_repo_path(origin.path())),
+            "moved artifact must not report the producing host path"
+        );
+    }
+
+    // Acceptance: docs/adr/0027 Decision 7 — "fix the one absolute-path leak
+    // (repo.root in index_status.json)". The in-repo common case persists "."
+    // so the artifact is host-independent.
+    #[test]
+    fn test_relativize_repo_root_in_repo_is_dot() {
+        let dir = tempdir().unwrap();
+        // store at <repo>/.grapha ⇒ index root == repo root ⇒ ".".
+        let store_dir = dir.path().join(".grapha");
+        let rel = relativize_repo_root(dir.path(), &store_dir);
+        assert_eq!(
+            rel, ".",
+            "in-repo .grapha should persist '.' not an absolute path"
+        );
+        assert!(!Path::new(&rel).is_absolute());
+    }
+
+    // When .grapha is nested below the repo root, the stored value walks up with
+    // `..` and still carries no absolute host path.
+    #[test]
+    fn test_relativize_repo_root_nested_index_walks_up() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("sub").join("dir");
+        fs::create_dir_all(&nested).unwrap();
+        let store_dir = nested.join(".grapha");
+        let rel = relativize_repo_root(dir.path(), &store_dir);
+        assert!(
+            !Path::new(&rel).is_absolute(),
+            "nested index root must stay relative: {rel}"
+        );
+        // Two levels deep ⇒ "../..".
+        assert_eq!(rel, "../..");
+    }
+
+    // Acceptance: docs/adr/0027 Decision 7 — read-time resolution. A relative
+    // stored value is rebuilt against the *live* project root, while a legacy
+    // absolute value is returned untouched so old index_status.json keeps working.
+    #[test]
+    fn test_resolve_repo_root_relative_rebinds_to_live_root() {
+        let dir = tempdir().unwrap();
+        // resolve_repo_root takes the stored path relative to the live index
+        // root (the path callers pass alongside the .grapha store).
+        let resolved = resolve_repo_root(".", dir.path());
+        let expected = normalize_repo_path(&dir.path().canonicalize().unwrap());
+        assert_eq!(
+            resolved, expected,
+            "relative root resolves against live index root"
+        );
+    }
+
+    #[test]
+    fn test_resolve_repo_root_absolute_is_returned_as_is() {
+        // A legacy absolute stored value is host-specific but must not be
+        // re-resolved against the live root (backward compatibility).
+        let legacy = if cfg!(windows) {
+            "C:/old/host/repo"
+        } else {
+            "/old/host/repo"
+        };
+        let live = tempdir().unwrap();
+        assert_eq!(resolve_repo_root(legacy, live.path()), legacy);
+    }
+
+    // Acceptance: docs/adr/0027 Decision 7 — a copied/moved .grapha opens and
+    // resolves against the new host even when the store lives in a subdirectory
+    // of the source tree (nested index root), exercising the `..`-walk path.
+    #[test]
+    fn copied_grapha_with_nested_store_resolves_after_move() {
+        let origin = tempdir().unwrap();
+        let repo = Repository::init(origin.path()).unwrap();
+        fs::write(origin.path().join("src.rs"), "fn main() {}\n").unwrap();
+        commit_all(&repo, "initial").unwrap();
+
+        // Nest the store under <repo>/index/.grapha.
+        let origin_store = origin.path().join("index").join(".grapha");
+        fs::create_dir_all(&origin_store).unwrap();
+        save_index_status(origin.path(), &origin_store, 1, 0, &GraphaConfig::default()).unwrap();
+
+        // The persisted root must be relative (walks up to the repo).
+        let stored = load_snapshot(&origin_store).unwrap().repo.unwrap().root;
+        assert!(
+            !Path::new(&stored).is_absolute(),
+            "nested store root must be relative: {stored}"
+        );
+
+        // Copy the whole tree to a new absolute location.
+        let moved = tempdir().unwrap();
+        let moved_root = moved.path().join("relocated");
+        copy_dir_all(origin.path(), &moved_root).unwrap();
+        let moved_index_root = moved_root.join("index");
+        let moved_store = moved_index_root.join(".grapha");
+
+        // Read back against the new index root; the relative `..` resolves to
+        // the new host's repo root, not the producing host.
+        let status = load_index_status(&moved_index_root, &moved_store).unwrap();
+        let reported = status.repo.expect("repo status present").root;
+        assert!(
+            !reported.contains(&normalize_repo_path(origin.path())),
+            "moved nested artifact must not report the producing host: {reported}"
+        );
+        let expected = normalize_repo_path(&moved_root.canonicalize().unwrap());
+        assert_eq!(
+            reported, expected,
+            "nested artifact resolves to the new repo root"
+        );
+    }
+
+    fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let target = dst.join(entry.file_name());
+            if ty.is_dir() {
+                copy_dir_all(&entry.path(), &target)?;
+            } else {
+                fs::copy(entry.path(), target)?;
+            }
+        }
+        Ok(())
     }
 
     #[test]

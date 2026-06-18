@@ -213,6 +213,34 @@ pub(crate) fn open_search_index(path: &Path, verbose: bool) -> anyhow::Result<ta
     }
 }
 
+/// Additively emit the portable artifact manifest next to the store
+/// (ADR-0027, Slice 3a producer side). Best-effort: a failure to write the
+/// unsigned manifest never fails the index run, since the manifest is a
+/// producer-side convenience consumed off-box, not part of the local query
+/// path. Signing is deferred to the Slice 3 spec.
+fn emit_portable_manifest(
+    project_root: &Path,
+    store_path: &Path,
+    graph: &grapha_core::graph::Graph,
+    verbose: bool,
+) {
+    let source_revision = crate::data_paths::project_identity(project_root).head_oid;
+    match crate::manifest::emit_manifest(store_path, graph, source_revision) {
+        Ok(manifest) => {
+            if verbose {
+                eprintln!(
+                    "  \x1b[32m✓\x1b[0m wrote portable manifest ({} languages, {})",
+                    manifest.languages.len(),
+                    manifest.index_revision
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!("  \x1b[33m!\x1b[0m failed to write portable manifest: {error}");
+        }
+    }
+}
+
 pub(crate) fn handle_index(
     path: PathBuf,
     format: String,
@@ -374,6 +402,7 @@ pub(crate) fn handle_index(
             graph.edges.len(),
             &config,
         )?;
+        emit_portable_manifest(&path, &store_path, &graph, show_progress);
 
         if show_progress {
             eprintln!(
@@ -469,6 +498,7 @@ pub(crate) fn handle_index(
         graph.edges.len(),
         &config,
     )?;
+    emit_portable_manifest(&path, &store_path, &graph, show_progress);
 
     if show_progress {
         progress::done_elapsed(
