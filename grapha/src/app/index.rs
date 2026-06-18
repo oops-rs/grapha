@@ -236,7 +236,9 @@ fn emit_portable_manifest(
             }
         }
         Err(error) => {
-            eprintln!("  \x1b[33m!\x1b[0m failed to write portable manifest: {error}");
+            if verbose {
+                eprintln!("  \x1b[33m!\x1b[0m failed to write portable manifest: {error}");
+            }
         }
     }
 }

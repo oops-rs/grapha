@@ -185,6 +185,11 @@ pub fn capabilities_for_language(language: &str) -> BTreeMap<String, Capability>
 /// For each op the best (highest) availability across the artifact's languages
 /// wins, so a Rust+TypeScript artifact reports `impact` as `full` because at
 /// least one language supports it deeply.
+///
+/// DEFERRED (per ADR-0027 Decision 7 / the Slice 3 spec): the artifact-level
+/// "best availability" collapse is intentional for now. Per-language capability
+/// granularity in the emitted manifest is in-spec but owned by Slice 3; do not
+/// add it here as part of the producer-only slices.
 pub fn merge_capabilities(languages: &[String]) -> BTreeMap<String, Capability> {
     let mut merged: BTreeMap<String, Capability> = BTreeMap::new();
     for language in languages {
@@ -314,8 +319,11 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
         "py" | "pyw" => "python",
         "go" => "go",
         "java" => "java",
-        "c" => "c",
-        "h" | "cpp" | "cc" | "cxx" | "hpp" | "hxx" => "cpp",
+        // `.h` is ambiguous (C or C++); map it to C, the lower common denominator,
+        // since both share the tree-sitter capability tier and C is the more
+        // conservative attribution for a bare header.
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => "cpp",
         "cs" => "csharp",
         "php" => "php",
         "rb" | "rake" => "ruby",

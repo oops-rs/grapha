@@ -184,15 +184,20 @@ fn relativize_repo_root(repo_root: &Path, store_dir: &Path) -> String {
 ///
 /// Legacy snapshots stored an absolute path; new snapshots store a path
 /// relative to the index root. Absolute stored values are returned as-is;
-/// relative values are resolved against the live `project_root`, so a moved
-/// `.grapha` reports the host where it is now opened rather than where it was
-/// produced.
-fn resolve_repo_root(stored: &str, project_root: &Path) -> String {
+/// relative values are resolved against the live index root (derived from the
+/// store dir via [`index_root_for_store`]), so a moved `.grapha` reports the
+/// host where it is now opened rather than where it was produced.
+///
+/// This is the read-time inverse of [`relativize_repo_root`]: both pivot on the
+/// *index root* (`store_dir.parent()`), so they stay symmetric even when the
+/// store lives in a project subdirectory (`--store-dir`) and the index root is
+/// therefore not the same as the caller's `project_root`.
+fn resolve_repo_root(stored: &str, store_dir: &Path) -> String {
     let stored_path = Path::new(stored);
     if stored_path.is_absolute() {
         return stored.to_string();
     }
-    let index_root = project_root.to_path_buf();
+    let index_root = index_root_for_store(store_dir);
     let resolved = index_root.join(stored_path);
     let resolved = resolved.canonicalize().unwrap_or(resolved);
     normalize_repo_path(&resolved)
@@ -557,6 +562,7 @@ fn changed_files_between_heads(
 fn compute_status(
     snapshot: IndexStatusSnapshot,
     project_root: &Path,
+    store_dir: &Path,
 ) -> anyhow::Result<IndexStatus> {
     let mut changed_files = BTreeSet::new();
     let mut freshness_tracking_available = false;
@@ -592,7 +598,7 @@ fn compute_status(
                 }
 
                 Some(RepoStatus {
-                    root: resolve_repo_root(&indexed_repo.root, project_root),
+                    root: resolve_repo_root(&indexed_repo.root, store_dir),
                     indexed_head_oid: indexed_repo.head_oid.clone(),
                     current_head_oid,
                     indexed_head_ref: indexed_repo.head_ref.clone(),
@@ -602,7 +608,7 @@ fn compute_status(
                 })
             }
             Err(_) => Some(RepoStatus {
-                root: resolve_repo_root(&indexed_repo.root, project_root),
+                root: resolve_repo_root(&indexed_repo.root, store_dir),
                 indexed_head_oid: indexed_repo.head_oid.clone(),
                 current_head_oid: None,
                 indexed_head_ref: indexed_repo.head_ref.clone(),
@@ -762,7 +768,7 @@ pub fn plan_index_work(
         return Ok(None);
     }
 
-    let status = compute_status(snapshot.clone(), project_root)?;
+    let status = compute_status(snapshot.clone(), project_root, store_dir)?;
     if !status.freshness_tracking_available {
         return Ok(None);
     }
@@ -804,7 +810,7 @@ pub fn plan_index_work(
 
 pub fn load_index_status(project_root: &Path, store_dir: &Path) -> anyhow::Result<IndexStatus> {
     match load_snapshot(store_dir) {
-        Ok(snapshot) => compute_status(snapshot, project_root),
+        Ok(snapshot) => compute_status(snapshot, project_root, store_dir),
         Err(error) => {
             if status_path(store_dir).exists() {
                 Err(error)
@@ -971,12 +977,14 @@ mod tests {
     fn test_resolve_repo_root_relative_rebinds_to_live_root() {
         let dir = tempdir().unwrap();
         // resolve_repo_root takes the stored path relative to the live index
-        // root (the path callers pass alongside the .grapha store).
-        let resolved = resolve_repo_root(".", dir.path());
+        // root, derived from the store dir's parent — the symmetric inverse of
+        // relativize_repo_root, which pivots on the same index root.
+        let store_dir = dir.path().join(".grapha");
+        let resolved = resolve_repo_root(".", &store_dir);
         let expected = normalize_repo_path(&dir.path().canonicalize().unwrap());
         assert_eq!(
             resolved, expected,
-            "relative root resolves against live index root"
+            "relative root resolves against the index root (store_dir parent)"
         );
     }
 
@@ -990,7 +998,85 @@ mod tests {
             "/old/host/repo"
         };
         let live = tempdir().unwrap();
-        assert_eq!(resolve_repo_root(legacy, live.path()), legacy);
+        let store_dir = live.path().join(".grapha");
+        assert_eq!(resolve_repo_root(legacy, &store_dir), legacy);
+    }
+
+    // Regression: relativize_repo_root and resolve_repo_root must be symmetric
+    // even when project_root != store_dir.parent() (the `--store-dir` case, where
+    // the store is pointed into a project subdirectory). Both pivot on the index
+    // root (store_dir.parent()); a value relativized at write time must resolve
+    // back to the original repo root at read time, including after a move.
+    #[test]
+    fn test_relativize_resolve_symmetric_when_store_in_subdir() {
+        let dir = tempdir().unwrap();
+        let repo_root = dir.path().canonicalize().unwrap();
+        // Store lives in a *subdirectory* of the project, so its index root
+        // (build/index/) is NOT the project root.
+        let index_root = repo_root.join("build").join("index");
+        let store_dir = index_root.join(".grapha");
+        fs::create_dir_all(&store_dir).unwrap();
+
+        // Write-time: express the repo root relative to the index root.
+        let stored = relativize_repo_root(&repo_root, &store_dir);
+        assert!(
+            !Path::new(&stored).is_absolute(),
+            "stored repo root must stay relative: {stored}"
+        );
+        // index root is repo/build/index ⇒ two levels up to the repo root.
+        assert_eq!(stored, "../..");
+
+        // Read-time: resolving with the SAME store dir recovers the repo root,
+        // regardless of any `project_root` a caller might pass elsewhere.
+        let resolved = resolve_repo_root(&stored, &store_dir);
+        assert_eq!(
+            resolved,
+            normalize_repo_path(&repo_root),
+            "relativize/resolve must round-trip through the index root"
+        );
+    }
+
+    // End-to-end: a copied/moved store that lives in a project subdirectory
+    // still resolves the repo root against the *new* host, proving the
+    // write-time relativize and read-time resolve agree on the index root.
+    #[test]
+    fn copied_store_in_project_subdir_resolves_after_move() {
+        let origin = tempdir().unwrap();
+        let repo = Repository::init(origin.path()).unwrap();
+        fs::write(origin.path().join("src.rs"), "fn main() {}\n").unwrap();
+        commit_all(&repo, "initial").unwrap();
+
+        // Store under <repo>/build/index/.grapha — project_root (the repo) is
+        // NOT store_dir.parent().
+        let origin_store = origin.path().join("build").join("index").join(".grapha");
+        fs::create_dir_all(&origin_store).unwrap();
+        save_index_status(origin.path(), &origin_store, 1, 0, &GraphaConfig::default()).unwrap();
+
+        let stored = load_snapshot(&origin_store).unwrap().repo.unwrap().root;
+        assert!(
+            !Path::new(&stored).is_absolute(),
+            "subdir store root must be relative: {stored}"
+        );
+
+        // Copy the whole tree (source + nested store) to a new absolute root.
+        let moved = tempdir().unwrap();
+        let moved_root = moved.path().join("relocated");
+        copy_dir_all(origin.path(), &moved_root).unwrap();
+        let moved_store = moved_root.join("build").join("index").join(".grapha");
+
+        // Read back: project_root is the moved repo root, store_dir is the
+        // moved nested store. The repo root resolves to the NEW host.
+        let status = load_index_status(&moved_root, &moved_store).unwrap();
+        let reported = status.repo.expect("repo status present").root;
+        assert!(
+            !reported.contains(&normalize_repo_path(origin.path())),
+            "moved subdir store must not report the producing host: {reported}"
+        );
+        assert_eq!(
+            reported,
+            normalize_repo_path(&moved_root.canonicalize().unwrap()),
+            "subdir store resolves to the new repo root"
+        );
     }
 
     // Acceptance: docs/adr/0027 Decision 7 — a copied/moved .grapha opens and
