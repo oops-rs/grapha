@@ -7,13 +7,20 @@
 //!
 //! This module is **producer-only and additive**: it never changes how the
 //! store is opened or queried, and writing the manifest is best-effort relative
-//! to the existing index pipeline. Signing (`manifest.sig`) and any consumer
-//! verification are deferred to the Slice 3 spec — we emit the unsigned
-//! manifest plus self-computed digests only.
+//! to the existing index pipeline.
+//!
+//! Slice 3 (ADR-0027) upgrades the manifest to **schema v2**: the digest chain
+//! is `blake3` end to end (`blake3:<hex>`), and a detached `ed25519` signature
+//! over a deterministic canonical JSON body authenticates the bundle. The
+//! signing/digest/canonical routines in this module are the **single shared
+//! cross-repo contract** — `nous-engine` depends on `grapha-engine` over the
+//! git dependency and reuses these `pub` routines verbatim, so the bytes grapha
+//! signs are byte-identical to the bytes nous verifies.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use grapha_core::graph::Graph;
@@ -24,10 +31,30 @@ pub const PRODUCER: &str = "grapha";
 /// Manifest schema version. Manifest fields are additive-only across versions
 /// (matching the `remote.rs` `bundle_schema_version` discipline); a consumer
 /// allowlists known versions and rejects unknown ones.
-pub const MANIFEST_SCHEMA_VERSION: &str = "1";
+///
+/// `"2"` is the first transportable bundle schema (signed, blake3 digest chain).
+/// A `"1"` manifest is a next-to-`.grapha` producer hint only — not a bundle.
+pub const MANIFEST_SCHEMA_VERSION: &str = "2";
 
 /// The filename written next to the `.grapha` store.
 pub const MANIFEST_FILENAME: &str = "manifest.json";
+
+/// The detached-signature filename inside a bundle. It is an archive member but
+/// is excluded from `artifact_digest` and from the signed canonical body (it
+/// cannot be inside what it signs).
+pub const SIGNATURE_FILENAME: &str = "manifest.sig";
+
+/// The signature algorithm grapha emits and nous verifies.
+pub const SIGNATURE_ALGORITHM: &str = "ed25519";
+
+/// Fixed domain-separation context prefixed to the canonical body before
+/// signing/verifying, so a grapha signature can never be cross-protocol
+/// replayed against a different message space. **Changing this constant breaks
+/// the cross-repo contract** — nous prepends the identical bytes.
+pub const SIGNATURE_DOMAIN_SEP: &[u8] = b"grapha:artifact-manifest:v2\0";
+
+/// The digest tag for the blake3 chain (`source_revision` / `artifact_digest`).
+pub const BLAKE3_TAG: &str = "blake3:";
 
 /// How a source path is expressed in the artifact. The portable artifact
 /// always uses `relative` so it carries no absolute host paths.
@@ -222,40 +249,77 @@ fn availability_rank(availability: Availability) -> u8 {
     }
 }
 
-/// The portable artifact manifest emitted next to the `.grapha` store.
+/// A detached signature descriptor stamped on a signed bundle. The signature
+/// bytes themselves live in [`SIGNATURE_FILENAME`]; this names the algorithm,
+/// the producer key id that selects the trust-store key, and the sig file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Signature {
+    pub algorithm: String,
+    pub key_id: String,
+    pub sig_file: String,
+}
+
+/// The portable artifact manifest emitted next to the `.grapha` store and,
+/// at schema v2, inside a signed `.nbundle`.
 ///
 /// Generalizes [`crate::remote::ProjectRevisionMetadata`]: `producer`,
 /// `schema_version`, and `source_revision` are the shared, reused fields; the
 /// rest are the 0027 additions.
+///
+/// The `signature` field is **excluded** from the canonical signing body (see
+/// [`canonical_manifest_bytes`]); every other field — including
+/// `artifact_digest` — is a field *inside* the signed body (no fragile
+/// `|| digest` append).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactManifest {
     pub producer: String,
     pub producer_version: String,
     pub schema_version: String,
-    /// Recomputable source revision. Today this reuses the git head OID as a
-    /// provenance hint; the spec'd `sha256:` source fingerprint binding is
-    /// owned by proposal 0026 and consumed by Slice 3.
+    /// Recomputable, tagged, full-width source fingerprint (`blake3:<hex>`).
+    /// A git commit SHA is at most `source_vcs_hint`, never the identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
     pub source_path_mode: SourcePathMode,
     /// Hash of the on-disk cache bytes (the `grapha.db` store + search index).
     pub index_revision: String,
-    /// Digest over the index bytes; the signing input in Slice 3.
+    /// Tagged `blake3:<hex>` digest over the sorted `index/` bytes; the signed
+    /// provenance binding the consumer recomputes and the citation stamps.
     pub artifact_digest: String,
     pub languages: Vec<String>,
     /// Per-op two-axis capability matrix, keyed by op name.
     pub capabilities: BTreeMap<String, Capability>,
+    /// The target codebase this bundle is for (anti-cross-targeting binding).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codebase_id: Option<String>,
+    /// Producer-asserted freshness window start (Unix seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<i64>,
+    /// Producer-asserted freshness window end (Unix seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    /// Optional VCS provenance hint (e.g. git head OID). Never the identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_vcs_hint: Option<String>,
+    /// Present on signed bundles; excluded from the canonical signing body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Signature>,
 }
 
-/// Build the manifest from the indexed graph + identity, without touching disk.
+/// Build the unsigned manifest from the indexed graph + identity, without
+/// touching disk. `index_revision`/`artifact_digest` are computed from the
+/// store bytes by the caller because they depend on the written files; the
+/// `signature` is attached later by [`sign_manifest`] + the bundle writer.
 ///
-/// `index_revision` and `artifact_digest` are computed from the store bytes by
-/// the caller (see [`emit_manifest`]) because they depend on the written files.
+/// `source_revision` is the tagged, full-width `blake3:<hex>` source
+/// fingerprint (the recomputable identity). The remaining v2 binding fields
+/// (`codebase_id`/`issued_at`/`expires_at`/`source_vcs_hint`) are passed
+/// through [`ManifestBindings`].
 pub fn build_manifest(
     graph: &Graph,
     source_revision: Option<String>,
     index_revision: String,
     artifact_digest: String,
+    bindings: ManifestBindings,
 ) -> ArtifactManifest {
     let languages = languages_in_graph(graph);
     let capabilities = merge_capabilities(&languages);
@@ -269,7 +333,22 @@ pub fn build_manifest(
         artifact_digest,
         languages,
         capabilities,
+        codebase_id: bindings.codebase_id,
+        issued_at: bindings.issued_at,
+        expires_at: bindings.expires_at,
+        source_vcs_hint: bindings.source_vcs_hint,
+        signature: None,
     }
+}
+
+/// The schema-v2 binding fields a producer stamps into the manifest. Kept as a
+/// struct so additive bindings do not churn [`build_manifest`]'s arity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManifestBindings {
+    pub codebase_id: Option<String>,
+    pub issued_at: Option<i64>,
+    pub expires_at: Option<i64>,
+    pub source_vcs_hint: Option<String>,
 }
 
 /// Emit the unsigned manifest next to the `.grapha` store. Best-effort and
@@ -280,13 +359,21 @@ pub fn build_manifest(
 pub fn emit_manifest(
     store_dir: &Path,
     graph: &Graph,
-    source_revision: Option<String>,
+    source_vcs_hint: Option<String>,
 ) -> anyhow::Result<ArtifactManifest> {
     let index_revision = hash_store_bytes(store_dir);
-    // The artifact digest is, for now, the same content hash of the index
-    // bytes; Slice 3 widens this to the full bundle digest that is signed.
+    // `artifact_digest` is the blake3 digest over the index bytes — the signed
+    // provenance binding. The next-to-store hint is unsigned; `grapha bundle`
+    // (re)computes the digests and signs for transport.
     let artifact_digest = index_revision.clone();
-    let manifest = build_manifest(graph, source_revision, index_revision, artifact_digest);
+    // The next-to-store hint carries no recomputable source fingerprint (the
+    // bundle writer computes it over the materialized `source/` tree); the git
+    // head OID, if any, is recorded only as a VCS hint.
+    let bindings = ManifestBindings {
+        source_vcs_hint,
+        ..ManifestBindings::default()
+    };
+    let manifest = build_manifest(graph, None, index_revision, artifact_digest, bindings);
     let path = store_dir.join(MANIFEST_FILENAME);
     let payload = serde_json::to_vec_pretty(&manifest)?;
     std::fs::write(&path, payload)?;
@@ -335,29 +422,19 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
     Some(language)
 }
 
-/// A dependency-free content hash of the index bytes (`grapha.db` + the
-/// search index directory), expressed `fnv1a64:<hex>`.
+/// A `blake3` content digest of the index bytes (`grapha.db` + the search index
+/// directory), expressed `blake3:<64-hex>`.
 ///
-/// NOTE: this reuses the codebase's existing FNV-1a idiom (`data_paths`) rather
-/// than adding a `sha2`/`blake3` dependency. It is sufficient for
-/// change-detection (`index_revision`) and an unsigned digest today. The Slice
-/// 3 signing spec is expected to upgrade this to a cryptographic `sha256:`
-/// digest as the signing input — flagged, not silently chosen.
-fn hash_store_bytes(store_dir: &Path) -> String {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-    let mut hash = FNV_OFFSET;
+/// This is the **single shared byte ordering** the consumer (nous) recomputes:
+/// `grapha.db` first, then each `search_index/` file in sorted order, mixing
+/// each file's name in before its bytes so renames change the digest. The
+/// manifest's own files (`manifest.json`/`manifest.sig`) are never folded in.
+pub fn hash_store_bytes(store_dir: &Path) -> String {
+    let mut hasher = blake3::Hasher::new();
 
-    let hash_file = |path: &Path, hash: &mut u64| {
-        if let Ok(bytes) = std::fs::read(path) {
-            for byte in bytes {
-                *hash ^= u64::from(byte);
-                *hash = hash.wrapping_mul(FNV_PRIME);
-            }
-        }
-    };
-
-    hash_file(&store_dir.join("grapha.db"), &mut hash);
+    if let Ok(bytes) = std::fs::read(store_dir.join("grapha.db")) {
+        hasher.update(&bytes);
+    }
 
     // Fold in the search index directory, in sorted order for determinism.
     let search_dir = store_dir.join("search_index");
@@ -368,18 +445,109 @@ fn hash_store_bytes(store_dir: &Path) -> String {
             .collect();
         files.sort();
         for file in files {
-            // Mix the relative name in too so renames change the hash.
+            // Mix the relative name in too so renames change the digest.
             if let Some(name) = file.file_name().and_then(|name| name.to_str()) {
-                for byte in name.bytes() {
-                    hash ^= u64::from(byte);
-                    hash = hash.wrapping_mul(FNV_PRIME);
-                }
+                hasher.update(name.as_bytes());
             }
-            hash_file(&file, &mut hash);
+            if let Ok(bytes) = std::fs::read(&file) {
+                hasher.update(&bytes);
+            }
         }
     }
 
-    format!("fnv1a64:{hash:016x}")
+    format!("{BLAKE3_TAG}{}", hasher.finalize().to_hex())
+}
+
+/// Compute the tagged `blake3:<hex>` digest of an arbitrary byte slice. This is
+/// the conformance-vector primitive (fixed bytes -> fixed tagged digest) and
+/// the routine nous reuses for any one-shot digest of bundle bytes.
+pub fn artifact_digest_blake3(bytes: &[u8]) -> String {
+    format!("{BLAKE3_TAG}{}", blake3::hash(bytes).to_hex())
+}
+
+// ── Canonical JSON + ed25519 signing (the shared cross-repo contract) ────────
+
+/// Deterministic canonical JSON of the manifest **without** its `signature`
+/// field, suitable as the signing/verification body.
+///
+/// The canonical form sorts object keys, emits no insignificant whitespace, and
+/// drops the `signature` field entirely (it cannot be inside what it signs).
+/// `artifact_digest` is a field *inside* this body, so a forged digest changes
+/// the signed bytes and fails verification — there is no fragile `|| digest`
+/// append. nous reproduces these exact bytes from the same routine over the git
+/// dependency; the committed conformance vector pins them.
+pub fn canonical_manifest_bytes(manifest: &ArtifactManifest) -> Vec<u8> {
+    let mut unsigned = manifest.clone();
+    unsigned.signature = None;
+    // serde_json::Value -> recursive key sort -> compact serialization. The
+    // manifest is small, well-typed, and free of non-finite numbers, so this is
+    // stable and deterministic across platforms.
+    let value = serde_json::to_value(&unsigned).expect("manifest serializes to JSON");
+    let canonical = canonicalize_json(value);
+    serde_json::to_vec(&canonical).expect("canonical JSON serializes")
+}
+
+/// Recursively sort object keys so serialization is order-independent.
+fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: serde_json::Map<String, serde_json::Value> = map
+                .into_iter()
+                .map(|(key, value)| (key, canonicalize_json(value)))
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect();
+            serde_json::Value::Object(sorted)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(canonicalize_json).collect())
+        }
+        other => other,
+    }
+}
+
+/// Sign the canonical body with the producer signing key, returning the raw
+/// 64-byte ed25519 signature written to [`SIGNATURE_FILENAME`]. The signed
+/// message is `SIGNATURE_DOMAIN_SEP || canonical_bytes`.
+pub fn sign_manifest(canonical_bytes: &[u8], signing_key: &SigningKey) -> Vec<u8> {
+    signing_key
+        .sign(&domain_separated(canonical_bytes))
+        .to_bytes()
+        .to_vec()
+}
+
+/// Verify a detached ed25519 signature over `SIGNATURE_DOMAIN_SEP ||
+/// canonical_bytes`. Returns `false` on any malformed signature or mismatch —
+/// never panics, so an attacker-controlled `sig_bytes` cannot crash the gate.
+pub fn verify_manifest(
+    canonical_bytes: &[u8],
+    sig_bytes: &[u8],
+    verifying_key: &VerifyingKey,
+) -> bool {
+    let Ok(sig_array) = <[u8; 64]>::try_from(sig_bytes) else {
+        return false;
+    };
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
+    verifying_key
+        .verify(&domain_separated(canonical_bytes), &signature)
+        .is_ok()
+}
+
+fn domain_separated(canonical_bytes: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(SIGNATURE_DOMAIN_SEP.len() + canonical_bytes.len());
+    message.extend_from_slice(SIGNATURE_DOMAIN_SEP);
+    message.extend_from_slice(canonical_bytes);
+    message
+}
+
+/// Load an ed25519 signing key from a 32-byte seed file (raw bytes). This is
+/// the key format `grapha bundle --sign-key` accepts; the producer key id is
+/// derived from the verifying key. Pure-Rust; no OpenSSL/PEM machinery.
+pub fn load_signing_key(seed: &[u8]) -> anyhow::Result<SigningKey> {
+    let seed: [u8; 32] = seed
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("ed25519 signing key seed must be exactly 32 bytes"))?;
+    Ok(SigningKey::from_bytes(&seed))
 }
 
 #[cfg(test)]
@@ -459,9 +627,10 @@ mod tests {
         };
         let manifest = build_manifest(
             &graph,
-            Some("abc123".to_string()),
-            "fnv1a64:0".to_string(),
-            "fnv1a64:0".to_string(),
+            Some("blake3:abc123".to_string()),
+            "blake3:0".to_string(),
+            "blake3:0".to_string(),
+            ManifestBindings::default(),
         );
         assert_eq!(manifest.producer, PRODUCER);
         assert_eq!(manifest.schema_version, MANIFEST_SCHEMA_VERSION);
@@ -698,13 +867,18 @@ mod tests {
         assert_eq!(json["schema_version"], MANIFEST_SCHEMA_VERSION);
         assert_eq!(json["producer_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(json["source_path_mode"], "relative");
-        assert_eq!(json["source_revision"], "deadbeef");
+        // The git head OID is a VCS hint, never the recomputable identity.
+        assert_eq!(json["source_vcs_hint"], "deadbeef");
+        assert!(
+            json.get("source_revision").is_none(),
+            "the next-to-store hint carries no recomputable source fingerprint"
+        );
         assert!(
             json["index_revision"]
                 .as_str()
                 .unwrap()
-                .starts_with("fnv1a64:"),
-            "index_revision must carry an algorithm-tagged digest"
+                .starts_with("blake3:"),
+            "index_revision must carry the blake3 algorithm tag"
         );
         assert!(json["artifact_digest"].as_str().is_some());
 
@@ -892,14 +1066,130 @@ mod tests {
         let written = store_dir.join(MANIFEST_FILENAME);
         assert!(written.is_file(), "manifest.json should be emitted");
         assert!(
-            !store_dir.join("manifest.sig").exists(),
-            "signing is deferred to Slice 3: no manifest.sig is written"
+            !store_dir.join(SIGNATURE_FILENAME).exists(),
+            "the next-to-store hint is unsigned: no manifest.sig is written here"
         );
-        assert!(manifest.index_revision.starts_with("fnv1a64:"));
+        assert!(manifest.index_revision.starts_with(BLAKE3_TAG));
         assert_eq!(manifest.artifact_digest, manifest.index_revision);
 
         let restored: ArtifactManifest =
             serde_json::from_slice(&std::fs::read(written).unwrap()).unwrap();
         assert_eq!(restored, manifest);
+    }
+
+    // ── ADR-0027 §0 + §cross-repo: the shared signing/digest contract ─────────
+    //
+    // These are the conformance vectors nous asserts against across the git
+    // dependency. The expected values are explicit constants so a drift in the
+    // canonicalization, digest, or domain-sep on either side fails loudly.
+
+    fn hex_lower(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A fully-pinned schema-v2 manifest used to anchor canonical bytes +
+    /// signature. Every field is fixed so the canonical body is deterministic.
+    fn fixed_vector_manifest() -> ArtifactManifest {
+        let mut capabilities = BTreeMap::new();
+        capabilities.insert(
+            "search_symbols".to_string(),
+            Capability::graph(Availability::Full),
+        );
+        capabilities.insert(
+            "read_file".to_string(),
+            Capability::source(Availability::Full),
+        );
+        ArtifactManifest {
+            producer: "grapha".to_string(),
+            producer_version: "0.0.0-vector".to_string(),
+            schema_version: "2".to_string(),
+            source_revision: Some("blake3:00ff".to_string()),
+            source_path_mode: SourcePathMode::Relative,
+            index_revision: "blake3:1234".to_string(),
+            artifact_digest: "blake3:abcd".to_string(),
+            languages: vec!["rust".to_string(), "swift".to_string()],
+            capabilities,
+            codebase_id: Some("demo-codebase".to_string()),
+            issued_at: Some(1_700_000_000),
+            expires_at: Some(1_800_000_000),
+            source_vcs_hint: Some("gitsha".to_string()),
+            signature: None,
+        }
+    }
+
+    // Conformance vector 1: fixed input bytes -> fixed tagged blake3 digest.
+    #[test]
+    fn conformance_blake3_digest_of_fixed_bytes() {
+        let digest = artifact_digest_blake3(b"grapha-conformance-vector");
+        assert_eq!(
+            digest, "blake3:cedfd1155eb3c18b461c601f3c96d332c78c668dcb24a5e92a68290385bff7cf",
+            "fixed bytes must map to a fixed tagged blake3 digest"
+        );
+    }
+
+    // Conformance vector 2: a fixed manifest -> fixed canonical bytes. The
+    // canonical form sorts keys and drops the signature field.
+    #[test]
+    fn conformance_canonical_bytes_are_sorted_and_drop_signature() {
+        let manifest = fixed_vector_manifest();
+        let canonical = canonical_manifest_bytes(&manifest);
+        let text = String::from_utf8(canonical.clone()).unwrap();
+
+        // Signature excluded; keys sorted (artifact_digest before producer).
+        assert!(
+            !text.contains("\"signature\""),
+            "signature excluded from body"
+        );
+        assert!(text.starts_with("{\"artifact_digest\":\"blake3:abcd\","));
+        let digest_pos = text.find("artifact_digest").unwrap();
+        let producer_pos = text.find("\"producer\"").unwrap();
+        assert!(digest_pos < producer_pos, "object keys are sorted");
+
+        // Attaching a signature must NOT change the canonical body.
+        let mut signed = manifest.clone();
+        signed.signature = Some(Signature {
+            algorithm: SIGNATURE_ALGORITHM.to_string(),
+            key_id: "k1".to_string(),
+            sig_file: SIGNATURE_FILENAME.to_string(),
+        });
+        assert_eq!(canonical, canonical_manifest_bytes(&signed));
+    }
+
+    // Conformance vector 3: a FIXED seed -> fixed keypair -> fixed signature
+    // that verifies; a tampered manifest is rejected.
+    #[test]
+    fn conformance_sign_verify_roundtrip_and_tamper_reject() {
+        // Fixed 32-byte seed -> deterministic ed25519 keypair.
+        let seed: [u8; 32] = [7u8; 32];
+        let signing_key = load_signing_key(&seed).unwrap();
+        let verifying_key = signing_key.verifying_key();
+
+        let manifest = fixed_vector_manifest();
+        let canonical = canonical_manifest_bytes(&manifest);
+        let sig = sign_manifest(&canonical, &signing_key);
+
+        // ed25519 over a fixed seed + fixed message is deterministic: signing
+        // twice yields byte-identical signatures, pinned to an explicit hex
+        // constant so nous can assert against the identical bytes.
+        const EXPECTED_SIG_HEX: &str = "463ce037f273f36f5b60eca7c0f36e27caf0f9fd3d1861af4eddc82a3e0447b0c90b049cfd78eaa23b996f0e7c0f8e3e00fa7e13d284c216a72e7b83a3427f0d";
+        assert_eq!(
+            hex_lower(&sig),
+            EXPECTED_SIG_HEX,
+            "fixed seed + fixed body -> fixed signature"
+        );
+        assert_eq!(sig, sign_manifest(&canonical, &signing_key));
+        assert_eq!(sig.len(), 64);
+        assert!(verify_manifest(&canonical, &sig, &verifying_key));
+
+        // Tamper: flip one byte of the digest -> different canonical body ->
+        // signature no longer verifies.
+        let mut tampered = manifest.clone();
+        tampered.artifact_digest = "blake3:abce".to_string();
+        let tampered_canonical = canonical_manifest_bytes(&tampered);
+        assert_ne!(canonical, tampered_canonical);
+        assert!(!verify_manifest(&tampered_canonical, &sig, &verifying_key));
+
+        // A malformed (wrong-length) signature is rejected, not panicked on.
+        assert!(!verify_manifest(&canonical, b"too-short", &verifying_key));
     }
 }

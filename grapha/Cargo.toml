@@ -16,6 +16,7 @@ grapha-core = { version = "0.4.1", path = "../grapha-core" }
 grapha-swift = { version = "0.4.1", path = "../grapha-swift" }
 anyhow = "1"
 bincode = { version = "2", features = ["serde"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 notify = "8.2"
 notify-debouncer-mini = "0.7"
 rayon = "1"

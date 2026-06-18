@@ -206,6 +206,31 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Build a portable, signed code-index artifact bundle (.nbundle)
+    #[command(
+        long_about = "Package the indexed source tree and .grapha store into a single deterministic, signed .nbundle archive that another host can verify and query off-box (ADR-0027). The bundle contains manifest.json, manifest.sig, source/, and index/. Two runs over one revision produce a byte-identical archive and one artifact_digest.\n\nThe project is indexed first if no store exists. The manifest is signed with the provided ed25519 key (a raw 32-byte seed file).",
+        after_help = "Examples:\n  grapha bundle --source . --out demo.nbundle --sign-key ./producer.key\n  grapha bundle --source /path/to/proj --store /path/to/.grapha --out demo.nbundle --sign-key ./producer.key --codebase-id demo"
+    )]
+    Bundle {
+        /// Source project directory to package under source/
+        #[arg(long, default_value = ".")]
+        source: PathBuf,
+        /// .grapha store directory (default: <source>/.grapha)
+        #[arg(long)]
+        store: Option<PathBuf>,
+        /// Output .nbundle path
+        #[arg(long)]
+        out: PathBuf,
+        /// ed25519 signing key file (raw 32-byte seed)
+        #[arg(long)]
+        sign_key: PathBuf,
+        /// Target codebase id stamped into the manifest (anti-cross-targeting)
+        #[arg(long)]
+        codebase_id: Option<String>,
+        /// Validity window in seconds from now (manifest expires_at)
+        #[arg(long, default_value = "604800")]
+        valid_for_secs: i64,
+    },
     /// Publish the current local index to a remote Grapha service
     #[command(
         long_about = "Upload the current local graph index as a project revision bundle. CI should run `grapha index .` first, then publish the resulting graph to the shared Grapha service.",
@@ -958,6 +983,22 @@ fn main() -> anyhow::Result<()> {
             timing,
         } => app::index::handle_index(path, format, store_dir, full_rebuild, timing)?,
         Commands::Migrate { path, from, force } => app::migrate::handle_migrate(path, from, force)?,
+        Commands::Bundle {
+            source,
+            store,
+            out,
+            sign_key,
+            codebase_id,
+            valid_for_secs,
+        } => app::bundle::handle_bundle(
+            source,
+            store,
+            out,
+            sign_key,
+            codebase_id,
+            valid_for_secs,
+            verbose,
+        )?,
         Commands::Publish {
             path,
             server,
