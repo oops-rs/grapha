@@ -54,7 +54,7 @@ pub fn write_bundle(
 ) -> anyhow::Result<()> {
     let mut members = Vec::new();
     collect_source_members(source_root, &mut members)?;
-    collect_index_members(store_dir, &mut members)?;
+    collect_index_members(store_dir, &mut members);
     // Sort by relative path so member ordering is deterministic regardless of
     // filesystem walk order.
     members.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
@@ -195,27 +195,48 @@ fn collect_source_members(source_root: &Path, out: &mut Vec<Member>) -> anyhow::
     Ok(())
 }
 
-/// Collect the `.grapha` store under `index/`: `grapha.db` plus the
-/// `search_index/` directory, in the same relative shape the consumer opens.
-fn collect_index_members(store_dir: &Path, out: &mut Vec<Member>) -> anyhow::Result<()> {
-    if !store_dir.exists() {
-        return Ok(());
+/// Collect the `.grapha` store under `index/`: every store file (at any depth),
+/// in the same relative shape the consumer opens. Delegates the walk to the
+/// shared [`store_index_files`] so the packaged set is byte-for-byte the set
+/// `crate::manifest::hash_store_bytes` digests.
+fn collect_index_members(store_dir: &Path, out: &mut Vec<Member>) {
+    for (rel, abs) in store_index_files(store_dir) {
+        out.push(Member {
+            rel_path: format!("index/{rel}"),
+            abs_path: abs,
+        });
     }
-    for entry in WalkBuilder::new(store_dir)
+}
+
+/// Enumerate the store files that get packaged into a bundle's `index/`, as
+/// `(relative-path, absolute-path)` pairs sorted by relative path.
+///
+/// This is the **single source of truth** for *which* files form the index
+/// substrate: a recursive walk of `store_dir` covering regular files at any
+/// depth, with `/`-separated relative paths, excluding the next-to-store
+/// `manifest.json`/`manifest.sig` hints and symlinks. Both the bundle packager
+/// ([`collect_index_members`]) and the digest ([`crate::manifest::hash_store_bytes`])
+/// iterate this exact set, so a file is never packaged-but-not-digested (or the
+/// reverse). On a missing store or any unreadable path, it yields what it can.
+pub fn store_index_files(store_dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    if !store_dir.exists() {
+        return out;
+    }
+    let walker = WalkBuilder::new(store_dir)
         .hidden(false)
         .git_ignore(false)
         .standard_filters(false)
-        .build()
-    {
-        let entry = entry?;
+        .build();
+    for entry in walker.flatten() {
         let path = entry.path();
         if path == store_dir {
             continue;
         }
-        // Never package the next-to-store manifest hint into index/.
-        let rel = path
-            .strip_prefix(store_dir)
-            .with_context(|| format!("relativizing {}", path.display()))?;
+        let Ok(rel) = path.strip_prefix(store_dir) else {
+            continue;
+        };
+        // Never package/digest the next-to-store manifest hint.
         if rel == Path::new(MANIFEST_FILENAME) || rel == Path::new(SIGNATURE_FILENAME) {
             continue;
         }
@@ -225,22 +246,27 @@ fn collect_index_members(store_dir: &Path, out: &mut Vec<Member>) -> anyhow::Res
         if !is_file || is_symlink {
             continue;
         }
-        out.push(Member {
-            rel_path: join_rel("index", rel),
-            abs_path: path.to_path_buf(),
-        });
+        out.push((rel_with_slashes(rel), path.to_path_buf()));
     }
-    Ok(())
+    // Sort by relative path so both packaging order and digest order are
+    // deterministic regardless of filesystem walk order.
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 /// Join a bundle prefix (`source` / `index`) with a relative path, using `/`
 /// separators so the archive paths are platform-independent.
 fn join_rel(prefix: &str, rel: &Path) -> String {
-    let mut parts = vec![prefix.to_string()];
-    for component in rel.components() {
-        parts.push(component.as_os_str().to_string_lossy().to_string());
-    }
-    parts.join("/")
+    format!("{prefix}/{}", rel_with_slashes(rel))
+}
+
+/// Render a relative path with `/` separators so the result is identical across
+/// platforms (the digest and the archive both depend on this normalization).
+fn rel_with_slashes(rel: &Path) -> String {
+    rel.components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn has_excluded_component(rel: &Path) -> bool {
@@ -412,6 +438,75 @@ mod tests {
         // Changing a real source file does move it.
         std::fs::write(source.join("README.md"), b"# changed").unwrap();
         assert_ne!(source_fingerprint(&source).unwrap(), first);
+    }
+
+    /// Scaffold a store with a top-level db + a top-level search file + a file
+    /// nested two levels deep under search_index/.
+    fn scaffold_nested_store(root: &Path) -> PathBuf {
+        let store = root.join("store");
+        let nested = store.join("search_index").join("segments").join("000");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(store.join("grapha.db"), b"db-bytes").unwrap();
+        std::fs::write(store.join("search_index").join("seg.idx"), b"top-seg").unwrap();
+        std::fs::write(nested.join("part.idx"), b"nested-bytes").unwrap();
+        store
+    }
+
+    // M1 + LOW-1: the set of files packaged into `index/` must be EXACTLY the
+    // set `hash_store_bytes` digests — same files, including nested ones — so a
+    // store file can never be packaged-but-not-digested. Both call the shared
+    // `store_index_files` collector.
+    #[test]
+    fn packaged_index_members_match_hashed_store_files_including_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = scaffold_nested_store(dir.path());
+
+        // The packaged `index/` member paths.
+        let mut members = Vec::new();
+        collect_index_members(&store, &mut members);
+        let packaged: BTreeSet<String> = members.iter().map(|m| m.rel_path.clone()).collect();
+
+        // The digested store files (relative-to-store), prefixed to `index/`.
+        let digested: BTreeSet<String> = store_index_files(&store)
+            .into_iter()
+            .map(|(rel, _)| format!("index/{rel}"))
+            .collect();
+
+        assert_eq!(
+            packaged, digested,
+            "packaged and digested store-file sets must be identical"
+        );
+        // The nested file is present in BOTH sets.
+        assert!(packaged.contains("index/search_index/segments/000/part.idx"));
+        assert!(digested.contains("index/search_index/segments/000/part.idx"));
+    }
+
+    // The shared digest agrees end to end over a multi-file + nested store, and
+    // moving a nested file's bytes moves the digest (it is genuinely covered).
+    #[test]
+    fn hash_store_bytes_covers_nested_file_under_search_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = scaffold_nested_store(dir.path());
+
+        let before = hash_store_bytes(&store);
+        // Same routine over the same bytes is stable.
+        assert_eq!(before, hash_store_bytes(&store));
+
+        // Change ONLY the deeply-nested file; the digest must move.
+        std::fs::write(
+            store
+                .join("search_index")
+                .join("segments")
+                .join("000")
+                .join("part.idx"),
+            b"nested-bytes-changed",
+        )
+        .unwrap();
+        assert_ne!(
+            before,
+            hash_store_bytes(&store),
+            "a nested store-file change must move the shared digest"
+        );
     }
 
     #[test]

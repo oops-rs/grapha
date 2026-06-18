@@ -43,9 +43,12 @@ pub(crate) fn handle_bundle(
 
     let graph = crate::app::index::load_graph(&source).context("loading graph for bundle")?;
 
-    // Digests: blake3 over the index bytes; blake3 over the source tree.
+    // Digests: blake3 over the index bytes; blake3 over the source tree. The
+    // signed `artifact_digest` is the SAME shared `hash_store_bytes` routine the
+    // consumer recomputes — never a private re-implementation of its ordering,
+    // so grapha can never sign a digest nous cannot reproduce.
     let index_revision = manifest::hash_store_bytes(&store_dir);
-    let artifact_digest = manifest::artifact_digest_blake3(&read_index_bytes(&store_dir)?);
+    let artifact_digest = index_revision.clone();
     let revision = source_fingerprint(&source).context("fingerprinting source tree")?;
 
     // Freshness window + provenance hint.
@@ -96,33 +99,6 @@ pub(crate) fn handle_bundle(
         println!("{}", out.display());
     }
     Ok(())
-}
-
-/// Read the index bytes in the shared `hash_store_bytes` ordering so the
-/// `artifact_digest` is a one-shot digest the consumer recomputes identically.
-fn read_index_bytes(store_dir: &Path) -> anyhow::Result<Vec<u8>> {
-    // Reuse the deterministic store fold by hashing via the same routine. The
-    // one-shot digest substrate is `grapha.db` followed by the sorted
-    // `search_index/` files (name + bytes), matching `hash_store_bytes`.
-    let mut buf = Vec::new();
-    if let Ok(bytes) = std::fs::read(store_dir.join("grapha.db")) {
-        buf.extend_from_slice(&bytes);
-    }
-    let search_dir = store_dir.join("search_index");
-    if let Ok(read_dir) = std::fs::read_dir(&search_dir) {
-        let mut files: Vec<_> = read_dir
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_file())
-            .collect();
-        files.sort();
-        for file in files {
-            if let Some(name) = file.file_name().and_then(|n| n.to_str()) {
-                buf.extend_from_slice(name.as_bytes());
-            }
-            buf.extend_from_slice(&std::fs::read(&file)?);
-        }
-    }
-    Ok(buf)
 }
 
 fn load_key(path: &Path) -> anyhow::Result<ed25519_dalek::SigningKey> {

@@ -422,39 +422,32 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
     Some(language)
 }
 
-/// A `blake3` content digest of the index bytes (`grapha.db` + the search index
-/// directory), expressed `blake3:<64-hex>`.
+/// A `blake3` content digest over **exactly the set of files packaged into the
+/// bundle's `index/` directory**, expressed `blake3:<64-hex>`.
 ///
-/// This is the **single shared byte ordering** the consumer (nous) recomputes:
-/// `grapha.db` first, then each `search_index/` file in sorted order, mixing
-/// each file's name in before its bytes so renames change the digest. The
-/// manifest's own files (`manifest.json`/`manifest.sig`) are never folded in.
+/// This is the **single shared routine** the producer signs over and the
+/// consumer (nous) recomputes — both [`crate::bundle::write_bundle`]'s `index/`
+/// packaging and `grapha bundle`'s signed `artifact_digest` digest *this* set:
+/// a recursive, relative-path-sorted walk of the store directory, mixing each
+/// file's relative path (with `/` separators) in before its bytes so a rename or
+/// a move to a nested subdir changes the digest. Files at any depth are covered,
+/// not just the top level of `search_index/`. The manifest's own next-to-store
+/// files (`manifest.json`/`manifest.sig`) are never folded in, matching the
+/// bundle packager's exclusion.
+///
+/// The walk and exclusions are kept in lockstep with
+/// [`crate::bundle::store_index_files`] (the bundle packager calls the same
+/// collector), so the packaged bytes and the digested bytes can never drift.
 pub fn hash_store_bytes(store_dir: &Path) -> String {
     let mut hasher = blake3::Hasher::new();
-
-    if let Ok(bytes) = std::fs::read(store_dir.join("grapha.db")) {
-        hasher.update(&bytes);
-    }
-
-    // Fold in the search index directory, in sorted order for determinism.
-    let search_dir = store_dir.join("search_index");
-    if let Ok(read_dir) = std::fs::read_dir(&search_dir) {
-        let mut files: Vec<_> = read_dir
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.is_file())
-            .collect();
-        files.sort();
-        for file in files {
-            // Mix the relative name in too so renames change the digest.
-            if let Some(name) = file.file_name().and_then(|name| name.to_str()) {
-                hasher.update(name.as_bytes());
-            }
-            if let Ok(bytes) = std::fs::read(&file) {
-                hasher.update(&bytes);
-            }
+    for (rel, abs) in crate::bundle::store_index_files(store_dir) {
+        // Mix the relative path in (with `/` separators) so renames/moves
+        // change the digest, then the file bytes.
+        hasher.update(rel.as_bytes());
+        if let Ok(bytes) = std::fs::read(&abs) {
+            hasher.update(&bytes);
         }
     }
-
     format!("{BLAKE3_TAG}{}", hasher.finalize().to_hex())
 }
 
@@ -470,21 +463,46 @@ pub fn artifact_digest_blake3(bytes: &[u8]) -> String {
 /// Deterministic canonical JSON of the manifest **without** its `signature`
 /// field, suitable as the signing/verification body.
 ///
-/// The canonical form sorts object keys, emits no insignificant whitespace, and
-/// drops the `signature` field entirely (it cannot be inside what it signs).
+/// The canonical form is **deterministic, recursive key-sorted, compact JSON**:
+/// `serde_json::to_value` → a recursive sort of every object's keys → compact
+/// (no-whitespace) serialization, with the `signature` field dropped (it cannot
+/// be inside what it signs). It is *not* a general RFC-8785 (JCS) implementation
+/// — it does no number canonicalization. That is sufficient here precisely
+/// because the manifest contains only `i64` integers and ASCII strings (no
+/// floats, no non-string object keys), so `serde_json`'s number formatting is
+/// already exact and stable; a [`debug_assert`] below pins that invariant.
+///
 /// `artifact_digest` is a field *inside* this body, so a forged digest changes
 /// the signed bytes and fails verification — there is no fragile `|| digest`
-/// append. nous reproduces these exact bytes from the same routine over the git
-/// dependency; the committed conformance vector pins them.
+/// append. This is also the **single public routine** nous reuses verbatim over
+/// the git dependency (it does not re-mirror a second canonicalizer), so the
+/// bytes grapha signs are byte-identical to the bytes nous verifies; the
+/// committed conformance vector pins them.
 pub fn canonical_manifest_bytes(manifest: &ArtifactManifest) -> Vec<u8> {
     let mut unsigned = manifest.clone();
     unsigned.signature = None;
     // serde_json::Value -> recursive key sort -> compact serialization. The
-    // manifest is small, well-typed, and free of non-finite numbers, so this is
-    // stable and deterministic across platforms.
+    // manifest is small, well-typed, and free of floats/non-finite numbers, so
+    // this is stable and deterministic across platforms without JCS number
+    // canonicalization.
     let value = serde_json::to_value(&unsigned).expect("manifest serializes to JSON");
+    debug_assert!(
+        !json_has_float(&value),
+        "manifest must not contain float values; canonical JSON skips JCS number canonicalization"
+    );
     let canonical = canonicalize_json(value);
     serde_json::to_vec(&canonical).expect("canonical JSON serializes")
+}
+
+/// Whether any value in the JSON tree is a non-integer (float) number. Used to
+/// guard the canonicalization's "integers + ASCII strings only" precondition.
+fn json_has_float(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Number(number) => number.as_i64().is_none() && number.as_u64().is_none(),
+        serde_json::Value::Array(items) => items.iter().any(json_has_float),
+        serde_json::Value::Object(map) => map.values().any(json_has_float),
+        _ => false,
+    }
 }
 
 /// Recursively sort object keys so serialization is order-independent.
@@ -1024,9 +1042,40 @@ mod tests {
         );
     }
 
+    // LOW-1 fix: the digest covers files at ANY depth under the store, so a
+    // file in a *subdirectory* of search_index/ moves the digest. Without the
+    // recursive walk such a nested file would be packaged-but-not-digested.
+    #[test]
+    fn test_index_revision_covers_nested_store_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_dir = dir.path().join(".grapha");
+        let nested = store_dir.join("search_index").join("segments").join("part");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(store_dir.join("grapha.db"), b"same-db").unwrap();
+        std::fs::write(nested.join("data.idx"), b"v1").unwrap();
+
+        let before = hash_store_bytes(&store_dir);
+
+        // Mutating a nested file must change the digest.
+        std::fs::write(nested.join("data.idx"), b"v2-changed").unwrap();
+        let after = hash_store_bytes(&store_dir);
+        assert_ne!(
+            before, after,
+            "a change to a file nested under search_index/ must move the digest"
+        );
+
+        // Adding a brand-new nested file must also change the digest.
+        std::fs::write(nested.join("more.idx"), b"new").unwrap();
+        let after_add = hash_store_bytes(&store_dir);
+        assert_ne!(
+            after, after_add,
+            "a new nested store file must move the digest (packaged ⇒ digested)"
+        );
+    }
+
     // The manifest itself is written into the store dir; re-emitting must not
-    // fold the previous manifest.json into the digest (only grapha.db +
-    // search_index are hashed), or the digest could never be stable.
+    // fold the previous manifest.json into the digest (only the store files are
+    // hashed), or the digest could never be stable.
     #[test]
     fn test_index_revision_ignores_its_own_manifest_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1117,6 +1166,26 @@ mod tests {
         }
     }
 
+    // M2 guard: the canonical body relies on the manifest carrying only
+    // integers + ASCII strings (no floats), so serde_json number formatting is
+    // already exact and JCS number canonicalization is unnecessary. Assert a
+    // realistic manifest has no float values.
+    #[test]
+    fn canonical_manifest_has_no_float_values() {
+        let manifest = fixed_vector_manifest();
+        let value = serde_json::to_value(&manifest).unwrap();
+        assert!(
+            !json_has_float(&value),
+            "the manifest must not contain float values"
+        );
+        // The detector itself must flag a float (so the guard is not vacuous).
+        let with_float = serde_json::json!({ "n": 1.5 });
+        assert!(json_has_float(&with_float));
+        // ...and must NOT flag plain integers.
+        let only_ints = serde_json::json!({ "a": 1, "b": [2, 3], "c": -4 });
+        assert!(!json_has_float(&only_ints));
+    }
+
     // Conformance vector 1: fixed input bytes -> fixed tagged blake3 digest.
     #[test]
     fn conformance_blake3_digest_of_fixed_bytes() {
@@ -1124,6 +1193,30 @@ mod tests {
         assert_eq!(
             digest, "blake3:cedfd1155eb3c18b461c601f3c96d332c78c668dcb24a5e92a68290385bff7cf",
             "fixed bytes must map to a fixed tagged blake3 digest"
+        );
+    }
+
+    // Conformance vector 1b: a FIXED store layout -> fixed tagged digest from
+    // the shared `hash_store_bytes` routine. This pins the *recursive* store
+    // walk (M1/LOW-1): `grapha.db`, a top-level search file, and a file nested
+    // two levels deep, each mixed in as `<relative-path-with-slashes><bytes>` in
+    // relative-path sort order. nous recomputes this exact value over a bundle's
+    // `index/`. (Changed vs 6ba47a9, which only digested the top level of
+    // search_index/ and mixed the bare file name, not the full relative path.)
+    #[test]
+    fn conformance_hash_store_bytes_over_fixed_recursive_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join(".grapha");
+        let nested = store.join("search_index").join("segments").join("000");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(store.join("grapha.db"), b"db-bytes").unwrap();
+        std::fs::write(store.join("search_index").join("seg.idx"), b"top-seg").unwrap();
+        std::fs::write(nested.join("part.idx"), b"nested-bytes").unwrap();
+
+        let digest = hash_store_bytes(&store);
+        assert_eq!(
+            digest, "blake3:723be7ee4b0a62075a7b4a877eff2ef2889da52ab403541be088f7f879d253ea",
+            "fixed recursive store layout must map to a fixed tagged digest"
         );
     }
 

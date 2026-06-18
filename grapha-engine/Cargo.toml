@@ -17,10 +17,10 @@ grapha-rust = { version = "0.4.1", path = "../grapha-rust" }
 grapha-swift = { version = "0.4.1", path = "../grapha-swift", optional = true }
 anyhow = "1"
 bincode = { version = "2", features = ["serde"] }
-blake3 = "1"
+blake3 = { version = "1", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
 ignore = "0.4"
-tar = "0.4"
+tar = { version = "0.4", default-features = false }
 indicatif = "0.18"
 git2 = { version = "0.20", default-features = false }
 langcodec = "0.12"
