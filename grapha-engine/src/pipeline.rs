@@ -316,6 +316,11 @@ pub fn run_pipeline(
         Ok::<_, anyhow::Error>((files, ()))
     })?;
 
+    let files: Vec<PathBuf> = files
+        .into_iter()
+        .filter(|file| !crate::discover::is_generated_or_minified(file, verbose))
+        .collect();
+
     let mut indexed_files: Vec<IndexedInputFile> = files
         .into_iter()
         .map(|file| IndexedInputFile {
@@ -390,11 +395,16 @@ pub fn run_pipeline(
                         &EvidenceMetadata::local_precise(),
                     ));
                 }
-                indexed_files.extend(ext_discovered.into_iter().map(|file| IndexedInputFile {
-                    path: file,
-                    repo_name: ext.name.clone(),
-                    context: ext_context.clone(),
-                }));
+                indexed_files.extend(
+                    ext_discovered
+                        .into_iter()
+                        .filter(|file| !crate::discover::is_generated_or_minified(file, verbose))
+                        .map(|file| IndexedInputFile {
+                            path: file,
+                            repo_name: ext.name.clone(),
+                            context: ext_context.clone(),
+                        }),
+                );
                 external_repo_count += 1;
                 external_source_contexts.push(ext_context);
             }

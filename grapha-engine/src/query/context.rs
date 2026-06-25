@@ -1045,6 +1045,45 @@ mod tests {
     }
 
     #[test]
+    fn context_bare_name_prefers_struct_decl_over_same_named_variant() {
+        // Regression: `context Span` must resolve to the `Span` struct, not the
+        // `ChunkLevel::Span` enum variant — matching how `search Span` ranks the
+        // struct first. (HIGH defect: bare-name resolution silently picked the
+        // wrong same-named symbol.)
+        let mk = |id: &str, kind: NodeKind| Node {
+            id: id.into(),
+            kind,
+            name: "Span".into(),
+            file: "x.rs".into(),
+            span: Span {
+                start: [0, 0],
+                end: [1, 0],
+            },
+            visibility: Visibility::Public,
+            metadata: StdHashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
+            snippet: None,
+            repo: None,
+        };
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                mk("chunk.rs::ChunkLevel.Span", NodeKind::Variant),
+                mk("span.rs::Span", NodeKind::Struct),
+                mk("span.rs::impl_Span", NodeKind::Impl),
+            ],
+            edges: vec![],
+        };
+
+        let ctx = query_context(&graph, "Span").unwrap();
+        assert_eq!(ctx.symbol.kind, NodeKind::Struct);
+        assert_eq!(ctx.symbol.id, "span.rs::Span");
+    }
+
+    #[test]
     fn context_type_query_includes_member_callers() {
         let mk = |id: &str, name: &str, kind: NodeKind| Node {
             id: id.into(),

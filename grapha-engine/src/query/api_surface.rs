@@ -63,9 +63,12 @@ fn is_visible_member(node: &Node, options: ApiSurfaceOptions) -> bool {
 }
 
 fn owner_node_mentions_type(owner: &Node, target: &Node) -> bool {
+    // An impl/extension owner contributes members to a type ONLY when it is an
+    // impl/extension *of that exact type*. A substring match would wrongly
+    // attribute the methods of `CorollaryStore`/`CorollaryLane` to `Corollary`
+    // (their names merely contain it), so require normalized-name equality.
     matches!(owner.kind, NodeKind::Extension | NodeKind::Impl)
-        && (normalize_symbol_name(&owner.name) == normalize_symbol_name(&target.name)
-            || owner.name.contains(&target.name))
+        && normalize_symbol_name(&owner.name) == normalize_symbol_name(&target.name)
 }
 
 fn id_implies_member(node: &Node, target: &Node) -> bool {
@@ -208,6 +211,56 @@ pub fn query_api_surface(
     })
 }
 
+/// Field/property vs. method counts for a type, derived from the same member
+/// discovery `query_api_surface` uses so `complexity` and `api` always agree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemberCounts {
+    pub property_count: usize,
+    pub method_count: usize,
+}
+
+fn is_property_member_kind(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Property | NodeKind::Field | NodeKind::Variant | NodeKind::EnumMember
+    )
+}
+
+fn is_method_member_kind(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Function | NodeKind::Method)
+}
+
+/// Count the fields/properties and methods declared on a type and its impls.
+///
+/// Rust types expose members through `Contains` edges from the struct (fields)
+/// and from `impl` owners (methods), not the Swift-style `Implements` edges the
+/// complexity metric historically counted — so without this, Rust types always
+/// reported `property_count`/`method_count` of 0.
+pub fn member_counts(graph: &Graph, target: &Node) -> MemberCounts {
+    let surface = match query_api_surface(
+        graph,
+        &target.id,
+        ApiSurfaceOptions {
+            include_private: true,
+        },
+    ) {
+        Ok(surface) => surface,
+        Err(_) => return MemberCounts::default(),
+    };
+
+    surface
+        .members
+        .iter()
+        .fold(MemberCounts::default(), |mut counts, member| {
+            if is_property_member_kind(member.symbol.kind) {
+                counts.property_count += 1;
+            } else if is_method_member_kind(member.symbol.kind) {
+                counts.method_count += 1;
+            }
+            counts
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +385,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.members[0].symbol.name, "debugOnly()");
+    }
+
+    #[test]
+    fn api_surface_excludes_methods_owned_by_other_types_with_name_prefix() {
+        // Regression: `api Corollary` must NOT list methods owned by
+        // CorollaryStore / CorollaryLane (their impl names merely *contain*
+        // "Corollary"). Only members of the queried type itself count.
+        let graph = Graph {
+            version: String::new(),
+            nodes: vec![
+                node("type", "Corollary", NodeKind::Struct, Visibility::Public),
+                node("impl_self", "Corollary", NodeKind::Impl, Visibility::Public),
+                node(
+                    "own_method",
+                    "answer()",
+                    NodeKind::Function,
+                    Visibility::Public,
+                ),
+                node(
+                    "impl_store",
+                    "CorollaryStore",
+                    NodeKind::Impl,
+                    Visibility::Public,
+                ),
+                node(
+                    "store_method",
+                    "open()",
+                    NodeKind::Function,
+                    Visibility::Public,
+                ),
+            ],
+            edges: vec![
+                edge("impl_self", "own_method", EdgeKind::Contains),
+                edge("impl_store", "store_method", EdgeKind::Contains),
+            ],
+        };
+
+        let result = query_api_surface(&graph, "Corollary", ApiSurfaceOptions::default()).unwrap();
+
+        let names: Vec<_> = result
+            .members
+            .iter()
+            .map(|member| member.symbol.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["answer()"],
+            "only the queried type's own impl methods should be listed"
+        );
     }
 
     #[test]

@@ -448,7 +448,8 @@ pub fn query_complexity(graph: &Graph, query: &str) -> Result<ComplexityResult, 
         .cloned()
         .unwrap_or_default();
 
-    let property_count = implementors
+    // Swift-style counts come from `Implements` edges (property/method → type).
+    let implementor_property_count = implementors
         .iter()
         .filter(|id| {
             node_index
@@ -457,7 +458,7 @@ pub fn query_complexity(graph: &Graph, query: &str) -> Result<ComplexityResult, 
         })
         .count();
 
-    let method_count = implementors
+    let implementor_method_count = implementors
         .iter()
         .filter(|id| {
             node_index
@@ -465,6 +466,14 @@ pub fn query_complexity(graph: &Graph, query: &str) -> Result<ComplexityResult, 
                 .is_some_and(|n| n.kind == NodeKind::Function)
         })
         .count();
+
+    // Rust types expose fields/methods through `Contains` edges (from the type
+    // and its `impl` blocks), not `Implements` edges — so reuse the api-surface
+    // member discovery to populate the counts. Take the larger of the two so
+    // neither the Swift implementor path nor the Rust member path regresses.
+    let surface_counts = super::api_surface::member_counts(graph, node);
+    let property_count = implementor_property_count.max(surface_counts.property_count);
+    let method_count = implementor_method_count.max(surface_counts.method_count);
 
     // Init parameter count: find the longest init among implementors
     let init_parameter_count = implementors
@@ -691,6 +700,44 @@ mod tests {
         assert_eq!(result.metrics.property_count, 2);
         assert_eq!(result.metrics.method_count, 1);
         assert_eq!(result.severity, "low");
+    }
+
+    #[test]
+    fn counts_rust_fields_and_impl_methods_via_contains_edges() {
+        // Regression: Rust types expose members through `Contains` edges (struct
+        // → fields, impl → methods), not Swift `Implements` edges. Previously
+        // property_count/method_count were always 0 for Rust.
+        let graph = Graph {
+            version: String::new(),
+            nodes: vec![
+                make_node("Corollary", "Corollary", NodeKind::Struct, "corollary.rs"),
+                make_node("f_a", "id", NodeKind::Field, "corollary.rs"),
+                make_node("f_b", "scope", NodeKind::Field, "corollary.rs"),
+                make_node("f_c", "answer", NodeKind::Field, "corollary.rs"),
+                make_node("impl_self", "Corollary", NodeKind::Impl, "corollary.rs"),
+                make_node("m_a", "new", NodeKind::Function, "corollary.rs"),
+                make_node("m_b", "is_reusable", NodeKind::Function, "corollary.rs"),
+                // A different type whose name merely contains "Corollary" — its
+                // methods must NOT be counted against `Corollary`.
+                make_node("impl_store", "CorollaryStore", NodeKind::Impl, "store.rs"),
+                make_node("m_store", "open", NodeKind::Function, "store.rs"),
+            ],
+            edges: vec![
+                make_edge("Corollary", "f_a", EdgeKind::Contains),
+                make_edge("Corollary", "f_b", EdgeKind::Contains),
+                make_edge("Corollary", "f_c", EdgeKind::Contains),
+                make_edge("impl_self", "m_a", EdgeKind::Contains),
+                make_edge("impl_self", "m_b", EdgeKind::Contains),
+                make_edge("impl_store", "m_store", EdgeKind::Contains),
+            ],
+        };
+
+        let result = query_complexity(&graph, "Corollary").unwrap();
+        assert_eq!(result.metrics.property_count, 3);
+        assert_eq!(
+            result.metrics.method_count, 2,
+            "only the type's own impl methods count, not CorollaryStore's"
+        );
     }
 
     #[test]

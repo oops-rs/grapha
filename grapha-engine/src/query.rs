@@ -119,26 +119,39 @@ pub(crate) fn is_swiftui_invalidation_source(node: &Node) -> bool {
         .is_some_and(|value| value == "true")
 }
 
+/// Rank node kinds when several symbols share the same name and match tier.
+///
+/// This MUST agree with `search.rs::declaration_rank` so that the bare-name a
+/// user types into `context`/`api`/`complexity`/`usages` resolves to the same
+/// symbol that `search` ranks first: a top-level *declaration* (struct, enum,
+/// trait, …) wins over a same-named enum *variant* or struct *field*, which in
+/// turn would otherwise silently shadow the real type (e.g. `Span` the struct
+/// vs `ChunkLevel::Span` the variant).
 fn kind_preference(kind: NodeKind) -> usize {
     match kind {
-        NodeKind::Function | NodeKind::Method | NodeKind::Route => 0,
-        NodeKind::Property | NodeKind::Variable => 1,
-        NodeKind::Variant | NodeKind::EnumMember | NodeKind::Field | NodeKind::Parameter => 2,
+        // Type-like declarations rank first (mirrors search's declaration_rank).
         NodeKind::Class
         | NodeKind::Struct
         | NodeKind::Enum
         | NodeKind::Trait
         | NodeKind::Module
         | NodeKind::Namespace
-        | NodeKind::Constant
         | NodeKind::TypeAlias
-        | NodeKind::Protocol => 3,
+        | NodeKind::Protocol => 0,
+        NodeKind::Function | NodeKind::Method | NodeKind::Route => 1,
+        NodeKind::Property
+        | NodeKind::Variable
+        | NodeKind::Constant
+        | NodeKind::Variant
+        | NodeKind::EnumMember
+        | NodeKind::Field
+        | NodeKind::Parameter => 2,
         NodeKind::Impl
         | NodeKind::Extension
         | NodeKind::Import
         | NodeKind::Export
-        | NodeKind::Package => 4,
-        NodeKind::File | NodeKind::Component | NodeKind::View | NodeKind::Branch => 5,
+        | NodeKind::Package => 3,
+        NodeKind::File | NodeKind::Component | NodeKind::View | NodeKind::Branch => 4,
     }
 }
 

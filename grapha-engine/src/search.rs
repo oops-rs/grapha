@@ -20,6 +20,17 @@ const SEARCH_TERMS_COMPLETE_MATCH_BOOST: f32 = 2.0;
 const SEARCH_TERMS_RELAXED_MATCH_BOOST: f32 = 1.5;
 const EXACT_NAME_MATCH_BOOST: f32 = 20.0;
 
+/// When a single sync touches more than this fraction of the graph's nodes,
+/// incremental document churn (delete + re-add per touched node, including
+/// locator-shifted nodes) stops paying off versus a clean full rebuild, so we
+/// fall back to rebuilding the whole tantivy index.
+const INCREMENTAL_REBUILD_FRACTION: f64 = 0.5;
+
+/// The fraction-based fallback only matters once the index is large enough that
+/// a full rebuild is genuinely costly. Below this node count a full rebuild is
+/// cheap, so we always stay incremental regardless of churn fraction.
+const INCREMENTAL_FRACTION_MIN_NODES: usize = 256;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
     pub id: String,
@@ -234,7 +245,17 @@ pub fn sync_index(
         mode: SyncMode::Incremental,
         documents: delta.node_stats(),
     };
-    if requires_full_rebuild_for_locators(previous_graph, delta) {
+
+    // A node's stored `locator` is derived from its Contains-edge ancestry, so a
+    // Contains-edge change can shift the locator of a node whose own id/content
+    // never changed. Those nodes are absent from the node delta, yet their index
+    // documents are now stale. Collect them up front and re-index them alongside
+    // the node delta rather than discarding the entire index.
+    let previous_locators = SymbolLocatorIndex::new(previous_graph);
+    let locators = SymbolLocatorIndex::new(graph);
+    let locator_shifted_nodes = locator_shifted_nodes(graph, delta, &previous_locators, &locators);
+
+    if incremental_churn_exceeds_threshold(graph, delta, locator_shifted_nodes.len()) {
         rebuild_index_impl(graph, index_path)?;
         return Ok(full_stats);
     }
@@ -258,11 +279,15 @@ pub fn sync_index(
     }
 
     let mut writer = index_writer(&index)?;
-    let locators = SymbolLocatorIndex::new(graph);
     for node_id in &delta.deleted_node_ids {
         writer.delete_term(Term::from_field_text(fields.id, node_id));
     }
-    for node in &delta.updated_nodes {
+    for node in delta
+        .updated_nodes
+        .iter()
+        .copied()
+        .chain(locator_shifted_nodes.iter().copied())
+    {
         writer.delete_term(Term::from_field_text(fields.id, &node.id));
     }
     for node in delta
@@ -270,6 +295,7 @@ pub fn sync_index(
         .iter()
         .copied()
         .chain(delta.updated_nodes.iter().copied())
+        .chain(locator_shifted_nodes.iter().copied())
     {
         writer.add_document(node_document(
             fields,
@@ -280,6 +306,55 @@ pub fn sync_index(
     writer.commit()?;
 
     Ok(incremental_stats)
+}
+
+/// Nodes whose stored `locator` differs between the previous and next graph but
+/// which are not already covered by the node delta (added/updated/deleted). A
+/// Contains-edge change reshapes the ancestry chain feeding the locator, so a
+/// node can need re-indexing even though its own fields never changed.
+fn locator_shifted_nodes<'a>(
+    graph: &'a Graph,
+    delta: &GraphDelta<'_>,
+    previous_locators: &SymbolLocatorIndex,
+    locators: &SymbolLocatorIndex,
+) -> Vec<&'a Node> {
+    let in_node_delta: std::collections::HashSet<&str> = delta
+        .added_nodes
+        .iter()
+        .chain(delta.updated_nodes.iter())
+        .map(|node| node.id.as_str())
+        .collect();
+
+    graph
+        .nodes
+        .iter()
+        .filter(|node| !in_node_delta.contains(node.id.as_str()))
+        .filter(|node| {
+            let previous = previous_locators.locator_for_id(&node.id);
+            // A node absent from the previous graph is, by definition, an added
+            // node and already handled by the node delta; skip it here.
+            previous.is_some_and(|previous| previous != locators.locator_for_node(node))
+        })
+        .collect()
+}
+
+/// Total documents the incremental path would delete + re-add for this sync,
+/// relative to the next graph's node count. Past [`INCREMENTAL_REBUILD_FRACTION`]
+/// a full rebuild is cheaper and avoids accumulating tantivy segment churn.
+fn incremental_churn_exceeds_threshold(
+    graph: &Graph,
+    delta: &GraphDelta<'_>,
+    locator_shifted_count: usize,
+) -> bool {
+    if graph.nodes.len() < INCREMENTAL_FRACTION_MIN_NODES {
+        return false;
+    }
+    let touched = delta.added_nodes.len()
+        + delta.updated_nodes.len()
+        + delta.deleted_node_ids.len()
+        + locator_shifted_count;
+    let threshold = (graph.nodes.len() as f64 * INCREMENTAL_REBUILD_FRACTION).ceil() as usize;
+    touched > threshold
 }
 
 fn resolve_fields(index: &Index) -> Result<SearchFields> {
@@ -464,29 +539,6 @@ fn exact_name_query(fields: SearchFields, query_str: &str) -> Option<Box<dyn Que
 
     let term = Term::from_field_text(fields.name_lower, &query_name);
     Some(Box::new(TermQuery::new(term, IndexRecordOption::Basic)))
-}
-
-fn requires_full_rebuild_for_locators(previous: &Graph, delta: &GraphDelta<'_>) -> bool {
-    if delta
-        .added_edges
-        .iter()
-        .chain(delta.updated_edges.iter())
-        .any(|edge| edge.edge.kind == EdgeKind::Contains)
-    {
-        return true;
-    }
-
-    if delta.deleted_edge_ids.is_empty() {
-        return false;
-    }
-
-    previous.edges.iter().any(|edge| {
-        edge.kind == EdgeKind::Contains
-            && delta
-                .deleted_edge_ids
-                .iter()
-                .any(|deleted| deleted == &crate::delta::edge_fingerprint(edge))
-    })
 }
 
 fn normalized_exact_name(name: &str) -> String {
@@ -1248,6 +1300,275 @@ mod tests {
         assert_eq!(results.len(), 1);
         let deleted = search(&index, "default_config", 10).unwrap();
         assert!(deleted.is_empty());
+    }
+
+    fn contains_edge(source: &str, target: &str) -> Edge {
+        Edge {
+            source: source.to_string(),
+            target: target.to_string(),
+            kind: EdgeKind::Contains,
+            confidence: 1.0,
+            direction: None,
+            operation: None,
+            condition: None,
+            async_boundary: None,
+            provenance: Vec::new(),
+            repo: None,
+        }
+    }
+
+    fn locator_fixture_node(id: &str, name: &str, kind: NodeKind) -> Node {
+        Node {
+            id: id.into(),
+            kind,
+            name: name.into(),
+            file: "src/lib.rs".into(),
+            span: Span {
+                start: [0, 0],
+                end: [1, 0],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: Some("Demo".into()),
+            snippet: None,
+            repo: None,
+        }
+    }
+
+    /// A Contains-edge change reshapes a child's locator even when the child
+    /// node itself is byte-identical. The incremental path must re-index that
+    /// child (so the new locator is searchable and the stale one is gone)
+    /// without falling back to a full rebuild.
+    #[test]
+    fn sync_index_reindexes_locator_shifted_children_without_full_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = locator_fixture_node("lib::Widget", "Widget", NodeKind::Struct);
+        let child = locator_fixture_node("lib::render", "render", NodeKind::Function);
+
+        // Previously the method was a free function: locator "Demo::lib.rs::render".
+        let previous = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![parent.clone(), child.clone()],
+            edges: vec![],
+        };
+        build_index(&previous, dir.path()).unwrap();
+
+        // Now the method is contained by Widget: locator becomes
+        // "Demo::lib.rs::Widget::render" even though the child node is unchanged.
+        let next = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![parent, child],
+            edges: vec![contains_edge("lib::Widget", "lib::render")],
+        };
+
+        let stats = sync_index(Some(&previous), &next, dir.path(), false, None).unwrap();
+        assert_eq!(
+            stats.mode,
+            SyncMode::Incremental,
+            "a single Contains-edge change must not trigger a full rebuild"
+        );
+
+        let index = Index::open_in_dir(dir.path()).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        // No duplicate documents: still exactly two symbols indexed.
+        assert_eq!(searcher.search(&AllQuery, &Count).unwrap(), 2);
+
+        // The shifted child carries its new owner-qualified locator.
+        let by_new_locator = search(&index, "Widget::render", 10).unwrap();
+        assert!(
+            by_new_locator
+                .iter()
+                .any(|result| result.id == "lib::render"
+                    && result.locator == "Demo::lib.rs::Widget::render"),
+            "child should be searchable under its new locator, got: {:?}",
+            by_new_locator
+                .iter()
+                .map(|result| &result.locator)
+                .collect::<Vec<_>>()
+        );
+
+        // The stale free-function locator is gone (locator is the only changed
+        // field, so the single stored doc must reflect the new value).
+        let render_docs = search(&index, "render", 10).unwrap();
+        assert!(
+            render_docs
+                .iter()
+                .all(|result| result.locator == "Demo::lib.rs::Widget::render"),
+            "stale locator must not survive incremental re-index, got: {:?}",
+            render_docs
+                .iter()
+                .map(|result| &result.locator)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The issue's core acceptance criterion: an incremental sync that removes
+    /// symbol X and adds symbol Y (while a Contains edge also changes) must find
+    /// Y, must not find X, and must stay on the incremental path.
+    #[test]
+    fn sync_index_removes_and_adds_symbols_incrementally_with_contains_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = locator_fixture_node("lib::Widget", "Widget", NodeKind::Struct);
+        let child = locator_fixture_node("lib::render", "render", NodeKind::Function);
+        let removed = locator_fixture_node("lib::oldSymbolX", "oldSymbolX", NodeKind::Function);
+
+        let previous = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![parent.clone(), child.clone(), removed],
+            edges: vec![],
+        };
+        build_index(&previous, dir.path()).unwrap();
+
+        let added = locator_fixture_node("lib::newSymbolY", "newSymbolY", NodeKind::Function);
+        let next = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![parent, child, added],
+            edges: vec![contains_edge("lib::Widget", "lib::render")],
+        };
+
+        let stats = sync_index(Some(&previous), &next, dir.path(), false, None).unwrap();
+        assert_eq!(stats.mode, SyncMode::Incremental);
+
+        let index = Index::open_in_dir(dir.path()).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        assert_eq!(searcher.search(&AllQuery, &Count).unwrap(), 3);
+
+        assert!(
+            search(&index, "newSymbolY", 10)
+                .unwrap()
+                .iter()
+                .any(|result| result.id == "lib::newSymbolY"),
+            "added symbol Y must be searchable"
+        );
+        assert!(
+            search(&index, "oldSymbolX", 10).unwrap().is_empty(),
+            "removed symbol X must no longer appear"
+        );
+    }
+
+    /// When the delta touches more than [`INCREMENTAL_REBUILD_FRACTION`] of a
+    /// sufficiently large graph, the sync falls back to a full rebuild instead
+    /// of churning the majority of documents.
+    #[test]
+    fn sync_index_full_rebuilds_when_delta_exceeds_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        const TOTAL: usize = INCREMENTAL_FRACTION_MIN_NODES + 44; // 300 nodes
+        let previous = Graph {
+            version: "0.1.0".to_string(),
+            nodes: (0..TOTAL)
+                .map(|index| {
+                    locator_fixture_node(
+                        &format!("lib::keep_{index}"),
+                        &format!("keep_{index}"),
+                        NodeKind::Function,
+                    )
+                })
+                .collect(),
+            edges: vec![],
+        };
+        build_index(&previous, dir.path()).unwrap();
+
+        // Keep a quarter, replace the rest (> 50% churn) — beyond the threshold.
+        let keep = TOTAL / 4;
+        let mut nodes: Vec<Node> = previous.nodes[..keep].to_vec();
+        nodes.extend((0..(TOTAL - keep)).map(|index| {
+            locator_fixture_node(
+                &format!("lib::fresh_{index}"),
+                &format!("fresh_{index}"),
+                NodeKind::Function,
+            )
+        }));
+        let next = Graph {
+            version: "0.1.0".to_string(),
+            nodes,
+            edges: vec![],
+        };
+
+        let stats = sync_index(Some(&previous), &next, dir.path(), false, None).unwrap();
+        assert_eq!(
+            stats.mode,
+            SyncMode::FullRebuild,
+            "an oversized delta should fall back to a full rebuild"
+        );
+
+        let index = Index::open_in_dir(dir.path()).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        assert_eq!(searcher.search(&AllQuery, &Count).unwrap(), TOTAL);
+        assert!(!search(&index, "fresh_0", 10).unwrap().is_empty());
+        assert!(
+            search(&index, &format!("keep_{}", TOTAL - 1), 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A modest, file-sized delta against a large graph (the common incremental
+    /// case) must stay on the fast incremental path — not fall back to a full
+    /// rebuild as the old Contains-edge heuristic did.
+    #[test]
+    fn sync_index_stays_incremental_for_small_delta_against_large_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        const TOTAL: usize = INCREMENTAL_FRACTION_MIN_NODES + 44;
+        let mut previous_nodes: Vec<Node> = (0..TOTAL)
+            .map(|index| {
+                locator_fixture_node(
+                    &format!("lib::keep_{index}"),
+                    &format!("keep_{index}"),
+                    NodeKind::Function,
+                )
+            })
+            .collect();
+        // A container whose Contains edge will shift in the next graph.
+        previous_nodes.push(locator_fixture_node(
+            "lib::Widget",
+            "Widget",
+            NodeKind::Struct,
+        ));
+        previous_nodes.push(locator_fixture_node(
+            "lib::render",
+            "render",
+            NodeKind::Function,
+        ));
+        let previous = Graph {
+            version: "0.1.0".to_string(),
+            nodes: previous_nodes.clone(),
+            edges: vec![],
+        };
+        build_index(&previous, dir.path()).unwrap();
+
+        // Touch a handful of nodes plus one Contains-edge change.
+        let mut next_nodes = previous_nodes;
+        next_nodes[0].signature = Some("fn keep_0_v2()".into());
+        let next = Graph {
+            version: "0.1.0".to_string(),
+            nodes: next_nodes,
+            edges: vec![contains_edge("lib::Widget", "lib::render")],
+        };
+
+        let stats = sync_index(Some(&previous), &next, dir.path(), false, None).unwrap();
+        assert_eq!(
+            stats.mode,
+            SyncMode::Incremental,
+            "a small delta with a Contains-edge change must not full-rebuild"
+        );
+
+        let index = Index::open_in_dir(dir.path()).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        assert_eq!(searcher.search(&AllQuery, &Count).unwrap(), TOTAL + 2);
+        assert!(
+            search(&index, "Widget::render", 10)
+                .unwrap()
+                .iter()
+                .any(|result| result.id == "lib::render"
+                    && result.locator == "Demo::lib.rs::Widget::render")
+        );
     }
 
     #[test]

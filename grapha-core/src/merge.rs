@@ -81,6 +81,328 @@ fn is_resolvable_symbol_kind(kind: NodeKind) -> bool {
     )
 }
 
+/// Confidence factor applied to edges bound through a file's `use` imports +
+/// the workspace module map. Lower than same-module (0.9) and direct-import
+/// single-candidate (0.8) resolution, but high enough to be trusted: the bind
+/// only happens when an *actual* import in the source file disambiguates the
+/// leading path segment to exactly one canonical definition.
+const IMPORT_BOUND_CONFIDENCE: f64 = 0.75;
+
+/// Kinds that can be the *canonical definition* a cross-boundary reference
+/// (a type ref, an associated-function call, or a trait impl) points at.
+/// Members (methods/fields) are resolved relative to one of these owners, never
+/// indexed here directly, so a bare `Type` reference never binds to a method.
+fn is_canonical_definition_kind(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Struct
+            | NodeKind::Enum
+            | NodeKind::Trait
+            | NodeKind::Protocol
+            | NodeKind::TypeAlias
+            | NodeKind::Class
+            | NodeKind::Function
+            | NodeKind::Constant
+    )
+}
+
+/// Normalize a crate/module identifier for cross-language matching.
+///
+/// Rust crate names appear with underscores in source (`use nous_core::…`) but
+/// the workspace module map and graph node `module` fields carry the package
+/// name with hyphens (`nous-core`). Folding both to a hyphenless, lowercase
+/// form makes `nous_core`, `nous-core` and `NousCore` compare equal.
+fn normalize_module_key(name: &str) -> String {
+    name.chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The first "meaningful" path segment of a reference target — the leading type
+/// or crate name. File-path and `crate`/`super`/`self` prefixes are skipped.
+fn leading_path_segment(target: &str) -> Option<&str> {
+    target_segments(target)
+        .into_iter()
+        .find(|segment| !matches!(*segment, "crate" | "super" | "self" | "Self"))
+}
+
+/// Build, per source file, a map from an imported leading identifier to the set
+/// of normalized modules it can resolve to.
+///
+/// Two identifier flavors are recorded for every `use` statement:
+///   * each explicitly imported symbol  (`use nous_core::{Confidence}` →
+///     `Confidence` ⇒ {nous-core}), and
+///   * the trailing path segment itself  (`use nous_core::Confidence` →
+///     `Confidence` ⇒ {nous-core}, and the crate alias `nous_core` ⇒ {nous-core}).
+///
+/// Only an actual import contributes here, so resolution can never invent a
+/// cross-crate edge to an unrelated same-named symbol.
+fn build_imported_symbol_modules(
+    results: &[ExtractionResult],
+) -> HashMap<String, HashMap<String, HashSet<String>>> {
+    let mut per_file: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
+    for result in results {
+        let Some(first_node) = result.nodes.first() else {
+            continue;
+        };
+        let file_key = first_node.file.to_string_lossy().to_string();
+        let file_entry = per_file.entry(file_key).or_default();
+        for import in &result.imports {
+            record_import(file_entry, import);
+        }
+    }
+    per_file
+}
+
+fn record_import(
+    file_entry: &mut HashMap<String, HashSet<String>>,
+    import: &crate::resolve::Import,
+) {
+    let raw_path = import.path.strip_prefix("import ").unwrap_or(&import.path);
+    let segments: Vec<&str> = raw_path
+        .split("::")
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    // The crate/module the imported symbols come from. For `use a::b::Sym` the
+    // crate is `a`; for a bare `use nous_core;` the crate is `nous_core`.
+    let Some(crate_segment) = segments
+        .iter()
+        .find(|segment| !matches!(**segment, "crate" | "super" | "self"))
+    else {
+        return;
+    };
+    let module_key = normalize_module_key(crate_segment);
+    if module_key.is_empty() {
+        return;
+    }
+
+    // Explicit grouped/named symbols: `use a::{A, B as C}` and `use a::Sym`.
+    for symbol in &import.symbols {
+        if let Some(name) = symbol_binding_name(symbol) {
+            file_entry
+                .entry(name)
+                .or_default()
+                .insert(module_key.clone());
+        }
+    }
+
+    // The path's own trailing segment is also a usable leading identifier
+    // (covers `use a::Type;` where `symbols` is empty), plus the crate alias
+    // itself for fully-qualified references like `nous_core::Confidence`.
+    if let Some(last) = segments.last()
+        && *last != "*"
+    {
+        file_entry
+            .entry((*last).to_string())
+            .or_default()
+            .insert(module_key.clone());
+    }
+    file_entry
+        .entry((*crate_segment).to_string())
+        .or_default()
+        .insert(module_key);
+}
+
+/// Extract the bound name of an imported symbol, honoring `Sym as Alias`.
+fn symbol_binding_name(symbol: &str) -> Option<String> {
+    let trimmed = symbol.trim();
+    if trimmed.is_empty() || trimmed == "*" || trimmed == "self" {
+        return None;
+    }
+    let bound = trimmed
+        .rsplit(" as ")
+        .next()
+        .unwrap_or(trimmed)
+        .trim()
+        .rsplit("::")
+        .next()
+        .unwrap_or(trimmed)
+        .trim();
+    (!bound.is_empty()).then(|| bound.to_string())
+}
+
+/// Index canonical type/function definitions by (normalized module, name).
+fn build_module_symbol_index<'a>(
+    nodes: impl Iterator<Item = (&'a str, NodeKind, Option<&'a str>, &'a str)>,
+) -> HashMap<(String, String), Vec<String>> {
+    let mut index: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for (id, kind, module, name) in nodes {
+        if !is_canonical_definition_kind(kind) {
+            continue;
+        }
+        let Some(module) = module else { continue };
+        index
+            .entry((normalize_module_key(module), name.to_string()))
+            .or_default()
+            .push(id.to_string());
+    }
+    index
+}
+
+struct ImportBindContext<'a> {
+    source_file: &'a str,
+    imported_symbol_modules: &'a HashMap<String, HashMap<String, HashSet<String>>>,
+    module_symbol_index: &'a HashMap<(String, String), Vec<String>>,
+    name_to_entries: &'a HashMap<&'a str, Vec<NameEntry>>,
+    candidate_to_owner_names: &'a HashMap<String, Vec<String>>,
+    id_to_kind: &'a HashMap<&'a str, NodeKind>,
+}
+
+/// Resolve a cross-boundary reference target through the source file's imports
+/// and the workspace module map. Returns the canonical node id to bind to.
+///
+/// Strategy: take the leading path segment (a type or crate), find the unique
+/// module it was imported from in this file, then look up the canonical
+/// definition there. For associated-function calls (`Type::method`) the trailing
+/// method is then located among that type's members; if the method itself can't
+/// be pinned the type node is *not* used as a fallback for calls (that would be
+/// a wrong call target), so the edge is left for the caller to drop.
+fn resolve_via_imports(
+    target: &str,
+    kind: EdgeKind,
+    ctx: &ImportBindContext<'_>,
+) -> Option<String> {
+    let file_imports = ctx.imported_symbol_modules.get(ctx.source_file)?;
+    let leading = leading_path_segment(target)?;
+    let module_key = unique_module_for(file_imports.get(leading)?)?;
+
+    // Strip the leading file-path / `crate` / `super` noise, then identify the
+    // canonical type/symbol name and any trailing member.
+    let meaningful: Vec<&str> = target_segments(target)
+        .into_iter()
+        .filter(|segment| !matches!(*segment, "crate" | "super" | "self" | "Self"))
+        .collect();
+    let (type_name, member) = split_type_and_member(&meaningful, leading, file_imports)?;
+
+    let type_id = ctx
+        .module_symbol_index
+        .get(&(module_key.clone(), type_name.to_string()))
+        .and_then(|ids| single(ids))
+        .cloned();
+
+    match (kind, member) {
+        (EdgeKind::Calls, Some(method)) => {
+            // `Type::method` — bind to the method, never the type (a type node
+            // is the wrong target for a call). Refuse if the method (e.g. an
+            // external/std associated fn) can't be pinned.
+            resolve_member(method, type_name, &module_key, ctx)
+        }
+        (EdgeKind::Calls, None) => {
+            // Bare imported function call (`func()` where `use a::func`).
+            type_id
+        }
+        _ => type_id,
+    }
+}
+
+/// Bind a dangling `impl Trait for Type` target to the canonical trait node.
+///
+/// Resolution order:
+///   1. import-guided binding (trait imported from another crate), then
+///   2. a unique same-module trait of that name (covers same-crate, cross-file
+///      impls like `impl ProviderTransport for StdioTransport`).
+///
+/// Returns `None` when the trait can't be uniquely pinned (e.g. external std
+/// traits such as `Default`/`From`), so the caller keeps the edge as written.
+fn resolve_implements_target(
+    target: &str,
+    source_module: Option<&str>,
+    ctx: &ImportBindContext<'_>,
+) -> Option<String> {
+    if let Some(bound) = resolve_via_imports(target, EdgeKind::Implements, ctx) {
+        return Some(bound);
+    }
+
+    // Same-module trait fallback: only bind when exactly one *trait* of that
+    // name exists in the source's module (no same-name guessing across crates).
+    let trait_name = leading_path_segment(target)?;
+    let module = source_module?;
+    let ids = ctx
+        .module_symbol_index
+        .get(&(normalize_module_key(module), trait_name.to_string()))?;
+    let traits: Vec<&String> = ids
+        .iter()
+        .filter(|id| {
+            matches!(
+                ctx.id_to_kind.get(id.as_str()),
+                Some(NodeKind::Trait | NodeKind::Protocol)
+            )
+        })
+        .collect();
+    single(&traits).map(|id| (*id).clone())
+}
+
+/// From the meaningful (noise-stripped) segments, derive `(type_name, member)`.
+///
+/// * `[Type]`                       → (Type, None)
+/// * `[Type, method]` (imported sym)→ (Type, Some(method))
+/// * `[crate_alias, Symbol]`        → (Symbol, None)
+/// * `[crate_alias, Symbol, method]`→ (Symbol, Some(method))
+fn split_type_and_member<'a>(
+    meaningful: &[&'a str],
+    leading: &'a str,
+    file_imports: &HashMap<String, HashSet<String>>,
+) -> Option<(&'a str, Option<&'a str>)> {
+    let first = *meaningful.first()?;
+    let leading_is_crate = first == leading && is_imported_crate_alias(file_imports, leading);
+
+    if leading_is_crate {
+        // crate_alias :: Symbol [:: member]
+        let symbol = *meaningful.get(1)?;
+        Some((symbol, meaningful.get(2).copied()))
+    } else {
+        // Type [:: member]
+        Some((first, meaningful.get(1).copied()))
+    }
+}
+
+/// Find the unique method named `method` whose owner type is `type_name` within
+/// `module_key`. Uses the precomputed member→owner-name map plus the node's
+/// module to avoid same-name collisions across crates.
+fn resolve_member(
+    method: &str,
+    type_name: &str,
+    module_key: &str,
+    ctx: &ImportBindContext<'_>,
+) -> Option<String> {
+    let candidates = ctx.name_to_entries.get(method)?;
+    let matches: Vec<&String> = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .module
+                .as_deref()
+                .is_some_and(|module| normalize_module_key(module) == module_key)
+        })
+        .filter(|candidate| {
+            ctx.candidate_to_owner_names
+                .get(&candidate.id)
+                .is_some_and(|owners| owners.iter().any(|owner| owner == type_name))
+        })
+        .map(|candidate| &candidate.id)
+        .collect();
+    single(&matches).map(|id| id.to_string())
+}
+
+fn is_imported_crate_alias(file_imports: &HashMap<String, HashSet<String>>, leading: &str) -> bool {
+    // A leading segment is a crate alias when its own normalized form is the
+    // module it maps to (e.g. `nous_core` ⇒ {nous-core}).
+    file_imports
+        .get(leading)
+        .is_some_and(|modules| modules.contains(&normalize_module_key(leading)))
+}
+
+fn unique_module_for(modules: &HashSet<String>) -> Option<String> {
+    (modules.len() == 1)
+        .then(|| modules.iter().next().cloned())
+        .flatten()
+}
+
+fn single<T>(items: &[T]) -> Option<&T> {
+    (items.len() == 1).then(|| &items[0])
+}
+
 pub fn merge(results: Vec<ExtractionResult>) -> Graph {
     let mut graph = Graph::new();
 
@@ -170,6 +492,22 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
         }
     }
 
+    // Cross-boundary resolution indexes: per-file imports + canonical defs.
+    let imported_symbol_modules = build_imported_symbol_modules(&results);
+    let module_symbol_index = build_module_symbol_index(graph.nodes.iter().map(|node| {
+        (
+            node.id.as_str(),
+            node.kind,
+            node.module.as_deref(),
+            node.name.as_str(),
+        )
+    }));
+    let id_to_kind: HashMap<&str, NodeKind> = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.kind))
+        .collect();
+
     let all_edges: Vec<_> = results
         .into_iter()
         .flat_map(|result| result.edges)
@@ -198,13 +536,60 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
 
         if node_ids.contains(edge.target.as_str())
             || edge.kind == EdgeKind::Uses
-            || edge.kind == EdgeKind::Implements
             || (edge.kind == EdgeKind::Calls
                 && (edge.direction.is_some() || edge.operation.is_some()))
             || is_external_usr_call
         {
             graph.edges.push(edge);
             continue;
+        }
+
+        let (source_module, source_file) = id_to_info
+            .get(edge.source.as_str())
+            .copied()
+            .unwrap_or((None, ""));
+
+        // Implements edges whose trait target dangles (the trait lives in
+        // another file/crate): bind to the canonical trait node via imports,
+        // else via a unique same-module trait of that name. If neither pins it
+        // (external traits like `Default`/`From`), keep the edge as written so
+        // the relationship is still recorded.
+        if edge.kind == EdgeKind::Implements {
+            let bind_ctx = ImportBindContext {
+                source_file,
+                imported_symbol_modules: &imported_symbol_modules,
+                module_symbol_index: &module_symbol_index,
+                name_to_entries: &name_to_entries,
+                candidate_to_owner_names: &candidate_to_owner_names,
+                id_to_kind: &id_to_kind,
+            };
+            if let Some(bound) = resolve_implements_target(&edge.target, source_module, &bind_ctx) {
+                if bound != edge.target {
+                    edge.confidence *= IMPORT_BOUND_CONFIDENCE;
+                }
+                edge.target = bound;
+            }
+            graph.edges.push(edge);
+            continue;
+        }
+
+        // Cross-boundary calls / type refs: when the target can't be resolved
+        // by same-name local resolution, try import-guided binding first.
+        if matches!(edge.kind, EdgeKind::Calls | EdgeKind::TypeRef) {
+            let bind_ctx = ImportBindContext {
+                source_file,
+                imported_symbol_modules: &imported_symbol_modules,
+                module_symbol_index: &module_symbol_index,
+                name_to_entries: &name_to_entries,
+                candidate_to_owner_names: &candidate_to_owner_names,
+                id_to_kind: &id_to_kind,
+            };
+            if let Some(bound) = resolve_via_imports(&edge.target, edge.kind, &bind_ctx) {
+                edge.target = bound;
+                edge.confidence *= IMPORT_BOUND_CONFIDENCE;
+                graph.edges.push(edge);
+                continue;
+            }
         }
 
         let target_name = target_symbol_name(&edge.target);
@@ -215,10 +600,6 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
             continue;
         }
 
-        let (source_module, source_file) = id_to_info
-            .get(edge.source.as_str())
-            .copied()
-            .unwrap_or((None, ""));
         let source_imports = file_imports.get(source_file);
         let source_owner_names = candidate_to_owner_names
             .get(&edge.source)
@@ -851,5 +1232,378 @@ mod tests {
             .find(|edge| edge.kind == EdgeKind::Reads)
             .unwrap();
         assert_eq!(read_edge.target, "sqlite.rs::SqliteStore.path");
+    }
+
+    // ---- Cross-boundary (import-guided) resolution ----------------------
+
+    fn node_in(id: &str, name: &str, kind: NodeKind, module: &str, file: &str) -> Node {
+        Node {
+            module: Some(module.to_string()),
+            file: PathBuf::from(file),
+            ..make_node(id, name, kind)
+        }
+    }
+
+    fn edge_of(source: &str, target: &str, kind: EdgeKind) -> Edge {
+        Edge {
+            source: source.to_string(),
+            target: target.to_string(),
+            kind,
+            confidence: 1.0,
+            direction: None,
+            operation: None,
+            condition: None,
+            async_boundary: None,
+            provenance: Vec::new(),
+            repo: None,
+        }
+    }
+
+    fn named_import(path: &str, symbols: &[&str]) -> crate::resolve::Import {
+        crate::resolve::Import {
+            path: path.to_string(),
+            symbols: symbols.iter().map(|s| s.to_string()).collect(),
+            kind: crate::resolve::ImportKind::Named,
+        }
+    }
+
+    #[test]
+    fn cross_crate_type_ref_resolves_through_import() {
+        // Caller crate does `use other::Thing;` then `field: Thing`.
+        let def = node_in(
+            "lib_a/src/lib.rs::Thing",
+            "Thing",
+            NodeKind::Struct,
+            "other",
+            "lib_a/src/lib.rs",
+        );
+        let caller_field = node_in(
+            "lib_b/src/use.rs::Holder.value",
+            "value",
+            NodeKind::Field,
+            "consumer",
+            "lib_b/src/use.rs",
+        );
+
+        let graph = merge(vec![
+            ExtractionResult {
+                nodes: vec![def],
+                edges: vec![],
+                imports: vec![],
+            },
+            ExtractionResult {
+                nodes: vec![caller_field],
+                // Bare type ref `Thing` qualified file-locally by the extractor.
+                edges: vec![edge_of(
+                    "lib_b/src/use.rs::Holder.value",
+                    "lib_b/src/use.rs::Thing",
+                    EdgeKind::TypeRef,
+                )],
+                imports: vec![named_import("other", &["Thing"])],
+            },
+        ]);
+
+        let type_ref = graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::TypeRef)
+            .expect("type ref should survive");
+        assert_eq!(type_ref.target, "lib_a/src/lib.rs::Thing");
+        assert!((type_ref.confidence - IMPORT_BOUND_CONFIDENCE).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cross_crate_associated_call_resolves_to_method() {
+        // `use other::Thing; Thing::new()` must land on other::Thing::new,
+        // not on some same-named `new` in the caller crate.
+        let thing = node_in(
+            "lib_a/src/lib.rs::Thing",
+            "Thing",
+            NodeKind::Struct,
+            "other",
+            "lib_a/src/lib.rs",
+        );
+        let thing_new = node_in(
+            "lib_a/src/lib.rs::impl_Thing::new",
+            "new",
+            NodeKind::Function,
+            "other",
+            "lib_a/src/lib.rs",
+        );
+        let thing_impl = node_in(
+            "lib_a/src/lib.rs::impl_Thing",
+            "Thing",
+            NodeKind::Impl,
+            "other",
+            "lib_a/src/lib.rs",
+        );
+        // A decoy `new` in the consumer crate that must NOT be chosen.
+        let decoy_new = node_in(
+            "lib_b/src/use.rs::impl_Other::new",
+            "new",
+            NodeKind::Function,
+            "consumer",
+            "lib_b/src/use.rs",
+        );
+        let decoy_impl = node_in(
+            "lib_b/src/use.rs::impl_Other",
+            "Other",
+            NodeKind::Impl,
+            "consumer",
+            "lib_b/src/use.rs",
+        );
+        let caller = node_in(
+            "lib_b/src/use.rs::run",
+            "run",
+            NodeKind::Function,
+            "consumer",
+            "lib_b/src/use.rs",
+        );
+
+        let graph = merge(vec![
+            ExtractionResult {
+                nodes: vec![thing, thing_impl, thing_new],
+                edges: vec![edge_of(
+                    "lib_a/src/lib.rs::impl_Thing",
+                    "lib_a/src/lib.rs::impl_Thing::new",
+                    EdgeKind::Contains,
+                )],
+                imports: vec![],
+            },
+            ExtractionResult {
+                nodes: vec![caller, decoy_impl, decoy_new],
+                edges: vec![
+                    edge_of(
+                        "lib_b/src/use.rs::impl_Other",
+                        "lib_b/src/use.rs::impl_Other::new",
+                        EdgeKind::Contains,
+                    ),
+                    edge_of("lib_b/src/use.rs::run", "Thing::new", EdgeKind::Calls),
+                ],
+                imports: vec![named_import("other", &["Thing"])],
+            },
+        ]);
+
+        let call = graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::Calls)
+            .expect("cross-crate call should resolve");
+        assert_eq!(call.target, "lib_a/src/lib.rs::impl_Thing::new");
+        assert!((call.confidence - IMPORT_BOUND_CONFIDENCE).abs() < 1e-9);
+    }
+
+    #[test]
+    fn trait_impl_in_other_file_binds_to_canonical_trait() {
+        // Trait declared in file A, implemented in file B (same crate, cross
+        // file). The dangling `<fileB>::Drawable` target must rebind to the
+        // real trait node.
+        let trait_node = node_in(
+            "shapes/src/draw.rs::Drawable",
+            "Drawable",
+            NodeKind::Trait,
+            "shapes",
+            "shapes/src/draw.rs",
+        );
+        let circle = node_in(
+            "shapes/src/circle.rs::Circle",
+            "Circle",
+            NodeKind::Struct,
+            "shapes",
+            "shapes/src/circle.rs",
+        );
+
+        let graph = merge(vec![
+            ExtractionResult {
+                nodes: vec![trait_node],
+                edges: vec![],
+                imports: vec![],
+            },
+            ExtractionResult {
+                nodes: vec![circle],
+                // `impl Drawable for Circle` → implements edge with a
+                // file-local phantom trait target.
+                edges: vec![edge_of(
+                    "shapes/src/circle.rs::Circle",
+                    "shapes/src/circle.rs::Drawable",
+                    EdgeKind::Implements,
+                )],
+                // same-crate import via `super` carries no crate alias; the
+                // same-module trait fallback must still bind it.
+                imports: vec![],
+            },
+        ]);
+
+        let implements = graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::Implements)
+            .expect("implements edge should be kept");
+        assert_eq!(implements.target, "shapes/src/draw.rs::Drawable");
+    }
+
+    #[test]
+    fn cross_crate_trait_impl_binds_through_import() {
+        let trait_node = node_in(
+            "lib_a/src/lib.rs::Storage",
+            "Storage",
+            NodeKind::Trait,
+            "other",
+            "lib_a/src/lib.rs",
+        );
+        let impl_type = node_in(
+            "lib_b/src/mem.rs::MemStore",
+            "MemStore",
+            NodeKind::Struct,
+            "consumer",
+            "lib_b/src/mem.rs",
+        );
+
+        let graph = merge(vec![
+            ExtractionResult {
+                nodes: vec![trait_node],
+                edges: vec![],
+                imports: vec![],
+            },
+            ExtractionResult {
+                nodes: vec![impl_type],
+                edges: vec![edge_of(
+                    "lib_b/src/mem.rs::MemStore",
+                    "lib_b/src/mem.rs::Storage",
+                    EdgeKind::Implements,
+                )],
+                imports: vec![named_import("other", &["Storage"])],
+            },
+        ]);
+
+        let implements = graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::Implements)
+            .expect("implements edge should be kept");
+        assert_eq!(implements.target, "lib_a/src/lib.rs::Storage");
+    }
+
+    #[test]
+    fn external_trait_impl_kept_unbound() {
+        // `impl Default for Config` — `Default` is external (std), not in the
+        // graph and not imported. The edge must survive unchanged.
+        let config = node_in(
+            "lib_a/src/lib.rs::Config",
+            "Config",
+            NodeKind::Struct,
+            "other",
+            "lib_a/src/lib.rs",
+        );
+
+        let graph = merge(vec![ExtractionResult {
+            nodes: vec![config],
+            edges: vec![edge_of(
+                "lib_a/src/lib.rs::Config",
+                "lib_a/src/lib.rs::Default",
+                EdgeKind::Implements,
+            )],
+            imports: vec![],
+        }]);
+
+        let implements = graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::Implements)
+            .expect("external implements edge should be kept");
+        assert_eq!(implements.target, "lib_a/src/lib.rs::Default");
+        assert!((implements.confidence - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unimported_type_ref_is_not_bound_to_same_name() {
+        // No import maps `Thing` here, so the cross-crate `Thing` def must NOT
+        // be picked up — guards against same-name false edges.
+        let def = node_in(
+            "lib_a/src/lib.rs::Thing",
+            "Thing",
+            NodeKind::Struct,
+            "other",
+            "lib_a/src/lib.rs",
+        );
+        let caller_field = node_in(
+            "lib_b/src/use.rs::Holder.value",
+            "value",
+            NodeKind::Field,
+            "consumer",
+            "lib_b/src/use.rs",
+        );
+
+        let graph = merge(vec![
+            ExtractionResult {
+                nodes: vec![def],
+                edges: vec![],
+                imports: vec![],
+            },
+            ExtractionResult {
+                nodes: vec![caller_field],
+                edges: vec![edge_of(
+                    "lib_b/src/use.rs::Holder.value",
+                    "lib_b/src/use.rs::Thing",
+                    EdgeKind::TypeRef,
+                )],
+                imports: vec![],
+            },
+        ]);
+
+        assert!(
+            graph
+                .edges
+                .iter()
+                .all(|edge| edge.kind != EdgeKind::TypeRef),
+            "unimported same-name type ref must be dropped, not bound"
+        );
+    }
+
+    #[test]
+    fn rust_crate_name_underscore_matches_hyphen_module() {
+        // `use nous_core::Confidence` (underscore) must resolve to a node whose
+        // module is `nous-core` (hyphen).
+        let def = node_in(
+            "crates/nous-core/src/confidence.rs::Confidence",
+            "Confidence",
+            NodeKind::Struct,
+            "nous-core",
+            "crates/nous-core/src/confidence.rs",
+        );
+        let field = node_in(
+            "crates/nous-arxiv/src/staged.rs::Staged.confidence",
+            "confidence",
+            NodeKind::Field,
+            "nous-arxiv",
+            "crates/nous-arxiv/src/staged.rs",
+        );
+
+        let graph = merge(vec![
+            ExtractionResult {
+                nodes: vec![def],
+                edges: vec![],
+                imports: vec![],
+            },
+            ExtractionResult {
+                nodes: vec![field],
+                edges: vec![edge_of(
+                    "crates/nous-arxiv/src/staged.rs::Staged.confidence",
+                    "crates/nous-arxiv/src/staged.rs::Confidence",
+                    EdgeKind::TypeRef,
+                )],
+                imports: vec![named_import("nous_core", &["Confidence", "PackId"])],
+            },
+        ]);
+
+        let type_ref = graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::TypeRef)
+            .expect("type ref should resolve across underscore/hyphen");
+        assert_eq!(
+            type_ref.target,
+            "crates/nous-core/src/confidence.rs::Confidence"
+        );
     }
 }

@@ -11,6 +11,57 @@ use grapha_core::graph::{
 
 use super::{ExtractionResult, LanguageExtractor};
 
+/// Well-known `std` `Option`/`Result` constructors that tree-sitter cannot
+/// distinguish from real function calls. `Some(x)` / `Ok(x)` / `Err(x)` parse as
+/// `call_expression`s and `if let Some(x) = ...` / `let Ok(x) = ...` parse as a
+/// binding pattern whose first identifier is the variant name. Neither is a real
+/// callee or variable, so we suppress them at edge/node creation. We deliberately
+/// only suppress these exact, unqualified constructors (a user's own `fn some()`
+/// or `let ok = ...` keeps its lowercase name and is unaffected).
+const STD_OPTION_RESULT_CONSTRUCTORS: &[&str] = &["Some", "None", "Ok", "Err"];
+
+/// Returns true when `name` is one of the suppressed std Option/Result
+/// constructors (`Some`/`None`/`Ok`/`Err`), matched exactly and case-sensitively.
+fn is_std_option_result_constructor(name: &str) -> bool {
+    STD_OPTION_RESULT_CONSTRUCTORS.contains(&name)
+}
+
+/// Declarative-macro names that, in item position, expand to a single newtype
+/// declaration whose name is the first `PascalCase` identifier argument (e.g.
+/// `ulid_newtype! { SourceId }` → `pub struct SourceId(Ulid);`). tree-sitter
+/// cannot expand macros, so we synthesize a struct-like type node heuristically
+/// for these. This list is intentionally conservative and extensible: add a
+/// project's own id/newtype-declaring macros here, or rely on the
+/// [`is_newtype_macro_name`] suffix heuristic for `*_newtype!` / `*_id!` macros.
+const NEWTYPE_DECL_MACROS: &[&str] = &["ulid_newtype", "uuid_newtype", "id_newtype", "newtype_id"];
+
+/// Suffixes that strongly imply a macro declares a single newtype in item
+/// position (e.g. `mod_newtype!`, `entity_id!`). Combined with the explicit
+/// [`NEWTYPE_DECL_MACROS`] allow-list so new declarative id macros are picked up
+/// without a code change while keeping false positives low.
+const NEWTYPE_DECL_MACRO_SUFFIXES: &[&str] = &["_newtype", "_id"];
+
+/// Returns true when a macro named `macro_name` is recognised as declaring a
+/// single newtype in item position. Matches the explicit allow-list first, then
+/// the conservative `*_newtype` / `*_id` suffix heuristic.
+fn is_newtype_macro_name(macro_name: &str) -> bool {
+    if NEWTYPE_DECL_MACROS.contains(&macro_name) {
+        return true;
+    }
+    NEWTYPE_DECL_MACRO_SUFFIXES
+        .iter()
+        .any(|suffix| macro_name.len() > suffix.len() && macro_name.ends_with(suffix))
+}
+
+/// Returns true when `name` looks like a type name (`PascalCase`: starts with an
+/// uppercase ASCII letter). Guards macro-synthesized type nodes against firing on
+/// lowercase identifier arguments (e.g. a string seed or a field name).
+fn is_pascal_case_type(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
 thread_local! {
     static RUST_PARSER: RefCell<Parser> = RefCell::new({
         let mut p = Parser::new();
@@ -632,28 +683,147 @@ fn walk_node(
                     kind,
                 });
 
+                // The import is recorded above as a structured `Import` plus a real
+                // `Import` node and a resolvable `file:<path> -> <import node>`
+                // `Imports` edge (see `push_import_node`). We deliberately do NOT
+                // emit the legacy `Uses` edge here: its source was a bare file path
+                // (not `file:<path>`) and its target was the raw `use ...;` text, so
+                // it referenced no graph nodes and was 100% dangling — flagged as
+                // `OrphanEdge` by `doctor` and pruned for LLM output. The parallel
+                // `imports`/`Imports` family encodes the same information correctly.
                 push_import_node(result, file, node, &path, use_text);
-
-                // Keep the Uses edge for backwards compatibility
-                result.edges.push(Edge {
-                    source: file.to_string(),
-                    target: use_text.to_string(),
-                    kind: EdgeKind::Uses,
-                    confidence: 0.7,
-                    direction: None,
-                    operation: None,
-                    condition: None,
-                    async_boundary: None,
-                    provenance: edge_provenance(file, node, file),
-                    repo: None,
-                });
             }
+        }
+        "macro_invocation" => {
+            if let Some(graph_node) =
+                extract_newtype_macro(node, source, file, module_path, parent_id, result)
+            {
+                if let Some(pid) = parent_id {
+                    result.edges.push(Edge {
+                        source: pid.to_string(),
+                        target: graph_node.id.clone(),
+                        kind: EdgeKind::Contains,
+                        confidence: 1.0,
+                        direction: None,
+                        operation: None,
+                        condition: None,
+                        async_boundary: None,
+                        provenance: edge_provenance(file, node, pid),
+                        repo: None,
+                    });
+                }
+                result.nodes.push(graph_node);
+            }
+            // No children of a macro token tree are real items, so do not recurse.
         }
         _ => {
             // For any other node kind, just walk its children
             walk_children(node, source, file, module_path, parent_id, result);
         }
     }
+}
+
+/// Synthesize a struct-like type node for a macro that declares a single newtype
+/// in item position (e.g. `ulid_newtype! { SourceId }` or `entity_id!(RevId)`).
+///
+/// tree-sitter cannot expand macros, so domain types declared this way are
+/// otherwise invisible to `context`/`impact`/`usages`. We fire only when:
+///   1. the macro name is recognised by [`is_newtype_macro_name`],
+///   2. the invocation is in *item* position (not an expression inside a function
+///      body), and
+///   3. the first identifier argument is `PascalCase` (a type name).
+///
+/// Returns `None` otherwise, so a misuse in expression position or a non-type
+/// argument never fabricates a phantom type.
+fn extract_newtype_macro(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    parent_id: Option<&str>,
+    result: &ExtractionResult,
+) -> Option<Node> {
+    let macro_name = node
+        .child_by_field_name("macro")
+        .and_then(|m| m.utf8_text(source).ok())?
+        .trim();
+    if !is_newtype_macro_name(macro_name) || !is_macro_in_item_position(node) {
+        return None;
+    }
+
+    let token_tree = macro_token_tree(node)?;
+    let type_name = first_macro_type_argument(token_tree, source)?;
+
+    let proposed_id = make_decl_id(file, module_path, parent_id, &type_name);
+    let id = unique_decl_id(result, proposed_id, node);
+    let start = node.start_position();
+    let end = node.end_position();
+    let mut metadata = HashMap::new();
+    metadata.insert("language".to_string(), "rust".to_string());
+    metadata.insert("macro_generated".to_string(), "true".to_string());
+    metadata.insert("macro".to_string(), macro_name.to_string());
+
+    Some(Node {
+        id,
+        kind: NodeKind::Struct,
+        name: type_name,
+        file: file.into(),
+        span: Span {
+            start: [start.row, start.column],
+            end: [end.row, end.column],
+        },
+        visibility: Visibility::Public,
+        metadata,
+        role: None,
+        signature: None,
+        doc_comment: extract_doc_comment(node, source),
+        module: None,
+        snippet: None,
+        repo: None,
+    })
+}
+
+/// Returns true when a `macro_invocation` sits in *item* position — directly
+/// under a `source_file`, a `declaration_list` (module / `impl` / `trait` body),
+/// or as a `;`-terminated `expression_statement` whose own container is one of
+/// those. Excludes invocations nested inside a function `block` (expression
+/// position), where they would be statements, not type declarations.
+fn is_macro_in_item_position(node: tree_sitter::Node) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    match parent.kind() {
+        "source_file" | "declaration_list" => true,
+        "expression_statement" => parent
+            .parent()
+            .map(|grandparent| matches!(grandparent.kind(), "source_file" | "declaration_list"))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Find the `token_tree` child of a `macro_invocation`. tree-sitter exposes it as
+/// an unnamed child (not a field), so we locate it by kind.
+fn macro_token_tree(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .find(|child| child.kind() == "token_tree")
+}
+
+/// Extract the first `PascalCase` identifier argument from a macro `token_tree`
+/// (the newtype's name). Skips doc-comment tokens and any leading non-type
+/// tokens; returns `None` if no `PascalCase` identifier is present.
+fn first_macro_type_argument(token_tree: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let mut cursor = token_tree.walk();
+    for child in token_tree.named_children(&mut cursor) {
+        if child.kind() == "identifier"
+            && let Ok(text) = child.utf8_text(source)
+            && is_pascal_case_type(text.trim())
+        {
+            return Some(text.trim().to_string());
+        }
+    }
+    None
 }
 
 /// Walk all named children of a node.
@@ -1383,6 +1553,13 @@ fn extract_variable(
     if name == "_" {
         return None;
     }
+    // `let Some(x) = ..` / `let Ok(v) = ..` destructure into a `tuple_struct_pattern`
+    // whose leading identifier is the std constructor, not a real binding. Suppress
+    // the phantom node named after the constructor (the inner binding, if any, is a
+    // separate concern and is not a top-level `let` name here).
+    if is_constructor_destructure(pattern, source) {
+        return None;
+    }
     let id = unique_decl_id(
         result,
         make_decl_id(file, module_path, parent_id, &name),
@@ -1413,6 +1590,35 @@ fn extract_variable(
         snippet: None,
         repo: None,
     })
+}
+
+/// Returns true when the *first* binding extracted from `pattern` comes from
+/// destructuring a std Option/Result constructor, e.g. the `Some` of
+/// `let Some(x) = opt else { .. };` or the leading `Some` of
+/// `let (Some(a), Some(b)) = pair else { .. };`. The variant name (`Some`/`Ok`/
+/// `Err`/`None`) is what `first_identifier_text` returns there, but it is not a
+/// real variable. Anchored to the `tuple_struct_pattern` shape (descending only
+/// through structural wrapper patterns) so a user binding is never mistaken for
+/// one.
+fn is_constructor_destructure(pattern: tree_sitter::Node, source: &[u8]) -> bool {
+    match pattern.kind() {
+        "tuple_struct_pattern" => pattern
+            .child_by_field_name("type")
+            .and_then(|type_node| type_node.utf8_text(source).ok())
+            .map(|type_text| is_std_option_result_constructor(type_text.trim()))
+            .unwrap_or(false),
+        // The leading binding of a tuple / reference wrapper drives the synthesized
+        // name; descend into the first named child to inspect it.
+        "tuple_pattern" | "reference_pattern" | "ref_pattern" | "mut_pattern" => {
+            let mut cursor = pattern.walk();
+            pattern
+                .named_children(&mut cursor)
+                .next()
+                .map(|first| is_constructor_destructure(first, source))
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
 }
 
 fn extract_type_alias(
@@ -1547,6 +1753,7 @@ fn extract_calls(
         && let Some(function_node) = node.child_by_field_name("function")
         && let Ok(fn_text) = function_node.utf8_text(source)
         && let Some(callee_name) = normalize_call_target(fn_text)
+        && !is_std_option_result_constructor(&callee_name)
     {
         let target_id = if is_unqualified_call_target(&callee_name) {
             make_id(file, module_path, &callee_name)
@@ -2067,9 +2274,31 @@ mod tests {
     }
 
     #[test]
-    fn extracts_use_edges() {
+    fn use_declarations_emit_resolvable_imports_not_dangling_uses() {
         let result = extract("use std::collections::HashMap;");
-        assert!(result.edges.iter().any(|e| e.kind == EdgeKind::Uses));
+
+        // The legacy `Uses` edge (bare-file-path source + raw `use ...;` target)
+        // was 100% dangling and must no longer be emitted.
+        assert!(
+            !result.edges.iter().any(|e| e.kind == EdgeKind::Uses),
+            "rust extractor must not emit dangling Uses edges"
+        );
+
+        // The parallel `imports` family encodes the same info correctly: a real
+        // Import node plus a `file:<path> -> <import node id>` Imports edge.
+        let import = find_node(&result, "std::collections::HashMap");
+        assert_eq!(import.kind, NodeKind::Import);
+        let import_edge = result
+            .edges
+            .iter()
+            .find(|e| e.kind == EdgeKind::Imports)
+            .expect("an Imports edge should exist for the use declaration");
+        assert_eq!(import_edge.source, "file:test.rs");
+        assert_eq!(import_edge.target, import.id);
+
+        // And the structured Import is recorded for cross-file resolution.
+        assert_eq!(result.imports.len(), 1);
+        assert_eq!(result.imports[0].path, "std::collections::HashMap");
     }
 
     #[test]
@@ -2583,6 +2812,224 @@ mod tests {
         assert_ne!(
             first.id, second.id,
             "distinct methods should remain distinct"
+        );
+    }
+
+    fn calls_to(result: &ExtractionResult, ends_with: &str) -> usize {
+        result
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .filter(|e| e.target == ends_with || e.target.ends_with(&format!("::{ends_with}")))
+            .count()
+    }
+
+    #[test]
+    fn suppresses_std_option_result_constructor_calls() {
+        let result = extract(
+            r#"
+            fn helper() -> i32 { 1 }
+            fn run() -> Option<i32> {
+                let _ = Ok::<_, ()>(helper());
+                let _ = Err::<(), _>(());
+                if helper() > 0 {
+                    return Some(helper());
+                }
+                None
+            }
+            "#,
+        );
+
+        // The std constructors must not produce Calls edges...
+        assert_eq!(calls_to(&result, "Some"), 0, "Some(..) must not be a call");
+        assert_eq!(calls_to(&result, "Ok"), 0, "Ok(..) must not be a call");
+        assert_eq!(calls_to(&result, "Err"), 0, "Err(..) must not be a call");
+        assert_eq!(calls_to(&result, "None"), 0, "None must not be a call");
+
+        // ...but real user calls are still recorded.
+        assert!(
+            calls_to(&result, "helper") >= 1,
+            "real function calls must still be extracted"
+        );
+    }
+
+    #[test]
+    fn keeps_user_function_named_like_constructor_lowercase() {
+        // A user's own lowercase `some` / `ok` must NOT be suppressed: only the
+        // exact PascalCase std constructors are filtered.
+        let result = extract(
+            r#"
+            fn some() {}
+            fn run() {
+                some();
+            }
+            "#,
+        );
+        assert_eq!(
+            calls_to(&result, "some"),
+            1,
+            "user fn `some` must remain a real callee"
+        );
+    }
+
+    #[test]
+    fn suppresses_phantom_constructor_variable_nodes() {
+        let result = extract(
+            r#"
+            fn run(opt: Option<i32>, res: Result<i32, ()>) {
+                let Some(x) = opt else { return; };
+                let Ok(y) = res else { return; };
+            }
+            "#,
+        );
+
+        for ctor in ["Some", "Ok", "Err", "None"] {
+            assert!(
+                !result
+                    .nodes
+                    .iter()
+                    .any(|n| n.kind == NodeKind::Variable && n.name == ctor),
+                "no phantom Variable node named {ctor} should be emitted"
+            );
+        }
+    }
+
+    #[test]
+    fn suppresses_phantom_constructor_in_tuple_destructure() {
+        // `let (Some(a), Some(b)) = pair else { .. };` — the leading binding's first
+        // identifier is the constructor `Some`, nested under a tuple_pattern.
+        let result = extract(
+            r#"
+            fn run(pair: (Option<i32>, Option<i32>)) {
+                let (Some(a), Some(b)) = pair else { return; };
+            }
+            "#,
+        );
+        assert!(
+            !result
+                .nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Variable && n.name == "Some"),
+            "tuple destructure of Some must not emit a phantom Some variable"
+        );
+    }
+
+    #[test]
+    fn keeps_real_let_binding_variables() {
+        // Regression guard: ordinary `let` bindings must still become Variables.
+        let result = extract(
+            r#"
+            fn run() {
+                let count = 1;
+            }
+            "#,
+        );
+        let count = find_node(&result, "count");
+        assert_eq!(count.kind, NodeKind::Variable);
+    }
+
+    #[test]
+    fn synthesizes_type_node_for_ulid_newtype_macro_brace_form() {
+        // The exact shape used by the nous corpus: a doc comment then a PascalCase
+        // identifier inside braces.
+        let result = extract(
+            r#"
+            ulid_newtype! {
+                /// Identifies a logical source.
+                SourceId
+            }
+            ulid_newtype! {
+                /// Identifies a captured revision.
+                RevisionId
+            }
+            "#,
+        );
+
+        let source_id = find_node(&result, "SourceId");
+        assert_eq!(source_id.kind, NodeKind::Struct);
+        assert_eq!(source_id.visibility, Visibility::Public);
+        assert_eq!(
+            source_id
+                .metadata
+                .get("macro_generated")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            source_id.metadata.get("macro").map(String::as_str),
+            Some("ulid_newtype")
+        );
+
+        let revision_id = find_node(&result, "RevisionId");
+        assert_eq!(revision_id.kind, NodeKind::Struct);
+
+        // The file should contain the synthesized types.
+        let file = find_node(&result, "test.rs");
+        assert!(has_edge(
+            &result,
+            &file.id,
+            &source_id.id,
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(
+            &result,
+            &file.id,
+            &revision_id.id,
+            EdgeKind::Contains
+        ));
+    }
+
+    #[test]
+    fn synthesizes_type_node_for_newtype_macro_paren_form() {
+        // Parenthesized, `;`-terminated form with a trailing string arg.
+        let result = extract(r#"id_newtype!(RevisionId, "rev");"#);
+        let node = find_node(&result, "RevisionId");
+        assert_eq!(node.kind, NodeKind::Struct);
+        // The string literal arg must be ignored (only the PascalCase ident counts).
+        assert!(
+            !result.nodes.iter().any(|n| n.name == "rev"),
+            "string argument must not become a type node"
+        );
+    }
+
+    #[test]
+    fn newtype_macro_heuristic_matches_suffix_patterns() {
+        let result = extract("entity_id! { OrderId }");
+        let node = find_node(&result, "OrderId");
+        assert_eq!(node.kind, NodeKind::Struct);
+    }
+
+    #[test]
+    fn does_not_synthesize_type_for_macro_in_expression_position() {
+        // A `*_id!` macro used inside a function body is an expression, not a type
+        // declaration — it must not fabricate a phantom type node.
+        let result = extract(
+            r#"
+            fn run() {
+                let _ = some_id!(Whatever);
+            }
+            "#,
+        );
+        assert!(
+            !result
+                .nodes
+                .iter()
+                .any(|n| n.name == "Whatever" && n.kind == NodeKind::Struct),
+            "macro in expression position must not synthesize a type node"
+        );
+    }
+
+    #[test]
+    fn does_not_synthesize_type_for_unrecognized_item_macro() {
+        // An unrelated declarative macro in item position must not be treated as a
+        // newtype declaration.
+        let result = extract("lazy_static! { static ref FOO: u8 = 1; }");
+        assert!(
+            !result
+                .nodes
+                .iter()
+                .any(|n| n.metadata.get("macro_generated").is_some()),
+            "non-newtype item macros must not synthesize type nodes"
         );
     }
 }
