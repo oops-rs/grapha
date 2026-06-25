@@ -3028,7 +3028,7 @@ mod tests {
             !result
                 .nodes
                 .iter()
-                .any(|n| n.metadata.get("macro_generated").is_some()),
+                .any(|n| n.metadata.contains_key("macro_generated")),
             "non-newtype item macros must not synthesize type nodes"
         );
     }

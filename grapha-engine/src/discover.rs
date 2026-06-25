@@ -333,7 +333,7 @@ mod tests {
         let file = dir.path().join("app.ts");
         // Many short lines, file comfortably above the dense-file size bound.
         let line = "export function compute(value: number): number { return value + 1; }\n";
-        let source: String = std::iter::repeat(line).take(1_000).collect();
+        let source = line.repeat(1_000);
         assert!(source.len() as u64 > DENSE_FILE_MIN_BYTES);
         fs::write(&file, source).unwrap();
 
@@ -345,7 +345,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("big.rs");
         let line = "    let result = compute(value) + offset; // a normal line of rust\n";
-        let source: String = std::iter::repeat(line).take(2_000).collect();
+        let source = line.repeat(2_000);
         fs::write(&file, source).unwrap();
 
         assert!(!is_generated_or_minified(&file, false));
