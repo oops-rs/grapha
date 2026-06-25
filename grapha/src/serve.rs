@@ -7,13 +7,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::response::Html;
 use axum::routing::{get, post};
+use tower_http::decompression::RequestDecompressionLayer;
 
 use grapha_core::graph::Graph;
 use tantivy::Index;
 
 const INDEX_HTML: &str = include_str!("serve/web/index.html");
+
+/// Maximum *decompressed* upload size accepted by the project service. Publish
+/// bundles arrive gzip-compressed (see `http_client::compress_upload_body`); the
+/// decompression layer expands them before the `Json` extractor enforces this
+/// limit, so it is bounded generously rather than left at axum's 2 MiB default.
+const MAX_UPLOAD_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 pub struct AppState {
     pub project_path: PathBuf,
@@ -97,6 +105,8 @@ pub async fn run(
         )
         .route("/api/annotations/{symbol}", get(api::get_annotation))
         .with_state(state)
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES))
+        .layer(RequestDecompressionLayer::new())
         .layer(tower_http::cors::CorsLayer::permissive());
 
     eprintln!("  \x1b[32m✓\x1b[0m serving at http://{host}:{port}");
@@ -146,6 +156,8 @@ pub async fn run_annotation_service(
             get(api::get_project_search),
         )
         .with_state(state)
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES))
+        .layer(RequestDecompressionLayer::new())
         .layer(tower_http::cors::CorsLayer::permissive());
 
     eprintln!(
@@ -163,4 +175,76 @@ fn annotation_log_timestamp() -> String {
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
     format!("[unix_ms={millis}]")
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use tower::util::ServiceExt;
+    use tower_http::decompression::RequestDecompressionLayer;
+
+    async fn echo(Json(value): Json<serde_json::Value>) -> Json<serde_json::Value> {
+        Json(value)
+    }
+
+    /// The request-decompression layer must hand a gzip-compressed
+    /// `Content-Encoding: gzip` upload to the JSON extractor already decoded, so
+    /// `grapha publish` bodies round-trip end to end.
+    #[tokio::test]
+    async fn decompresses_gzip_upload_before_json_extraction() {
+        let app = Router::new()
+            .route("/echo", post(echo))
+            .layer(RequestDecompressionLayer::new());
+
+        let payload = serde_json::json!({ "hello": "world", "n": 42 });
+        let compressed =
+            crate::http_client::compress_upload_body(&serde_json::to_vec(&payload).unwrap())
+                .unwrap();
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/echo")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_ENCODING, "gzip")
+            .body(Body::from(compressed))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let echoed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(echoed, payload);
+    }
+
+    /// Identity (uncompressed) uploads must still work, so an older client that
+    /// has not adopted gzip keeps publishing successfully.
+    #[tokio::test]
+    async fn passes_through_uncompressed_upload() {
+        let app = Router::new()
+            .route("/echo", post(echo))
+            .layer(RequestDecompressionLayer::new());
+
+        let payload = serde_json::json!({ "plain": true });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/echo")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let echoed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(echoed, payload);
+    }
 }

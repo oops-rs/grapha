@@ -1,6 +1,6 @@
 [package]
 name = "grapha-core"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "Shared graph types and extraction traits for Grapha"
 license = "MIT"

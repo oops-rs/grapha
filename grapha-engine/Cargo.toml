@@ -1,6 +1,6 @@
 [package]
 name = "grapha-engine"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 publish = false
 description = "Library engine for Grapha code intelligence"
@@ -12,13 +12,14 @@ keywords = ["code-intelligence", "graph", "analysis", "search", "query"]
 categories = ["development-tools"]
 
 [dependencies]
-grapha-core = { version = "0.4.1", path = "../grapha-core" }
-grapha-rust = { version = "0.4.1", path = "../grapha-rust" }
-grapha-swift = { version = "0.4.1", path = "../grapha-swift", optional = true }
+grapha-core = { version = "0.4.2", path = "../grapha-core" }
+grapha-rust = { version = "0.4.2", path = "../grapha-rust" }
+grapha-swift = { version = "0.4.2", path = "../grapha-swift", optional = true }
 anyhow = "1"
 bincode = { version = "2", features = ["serde"] }
 blake3 = { version = "1", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+flate2 = "1"
 ignore = "0.4"
 tar = { version = "0.4", default-features = false }
 indicatif = "0.18"

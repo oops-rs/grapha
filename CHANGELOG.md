@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2 - 2026-06-25
+
+### Changed
+
+- Compressed upload request bodies: `grapha publish`, remote pull, and annotation sync now gzip their JSON payloads (`Content-Encoding: gzip`) before sending, and the embedded Grapha service transparently decompresses them. This shrinks publish traffic for large symbol graphs and raises the server's accepted body size well above axum's 2 MiB default.
+- Deployment ordering: upgrade the Grapha service before (or together with) clients that publish. A new gzip-sending client cannot publish to an older service that lacks request decompression; older (non-gzip) clients keep working against the new service unchanged.
+
 ## 0.4.1 - 2026-05-07
 
 ### Added

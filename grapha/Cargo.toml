@@ -1,6 +1,6 @@
 [package]
 name = "grapha"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "Blazingly fast code intelligence CLI and MCP server for Swift, Rust, and best-effort tree-sitter languages"
 license = "MIT"
@@ -11,9 +11,9 @@ keywords = ["code-intelligence", "mcp", "analysis", "swift", "rust"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-grapha-engine = { version = "0.4.1", path = "../grapha-engine", features = ["swift"] }
-grapha-core = { version = "0.4.1", path = "../grapha-core" }
-grapha-swift = { version = "0.4.1", path = "../grapha-swift" }
+grapha-engine = { version = "0.4.2", path = "../grapha-engine", features = ["swift"] }
+grapha-core = { version = "0.4.2", path = "../grapha-core" }
+grapha-swift = { version = "0.4.2", path = "../grapha-swift" }
 anyhow = "1"
 bincode = { version = "2", features = ["serde"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
@@ -48,7 +48,7 @@ tree-sitter-ruby = "0.23"
 tree-sitter-typescript = "0.23"
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "decompression-gzip"] }
 urlencoding = "2"
 langcodec = "0.12"
 xcassets = "0.2"
@@ -57,3 +57,4 @@ xcassets = "0.2"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

@@ -128,17 +128,35 @@ fn request(
     body: Option<&[u8]>,
 ) -> anyhow::Result<String> {
     let body = body.unwrap_or(&[]);
+    // Compress the upload body (e.g. an annotation push) before it hits the
+    // socket, matching what the Grapha service transparently decompresses.
+    let (payload, content_encoding) = if body.is_empty() {
+        (Vec::new(), None)
+    } else {
+        (
+            crate::http_client::compress_upload_body(body)?,
+            Some(crate::http_client::UPLOAD_CONTENT_ENCODING),
+        )
+    };
+
     let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))?;
     stream.set_read_timeout(Some(Duration::from_secs(20)))?;
     stream.set_write_timeout(Some(Duration::from_secs(20)))?;
     let request_path = endpoint.path(path);
     write!(
         stream,
-        "{method} {request_path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {request_path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n",
         endpoint.host,
-        body.len()
     )?;
-    stream.write_all(body)?;
+    if let Some(encoding) = content_encoding {
+        write!(stream, "Content-Encoding: {encoding}\r\n")?;
+    }
+    write!(
+        stream,
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    )?;
+    stream.write_all(&payload)?;
 
     let mut response = Vec::new();
     stream.read_to_end(&mut response)?;
