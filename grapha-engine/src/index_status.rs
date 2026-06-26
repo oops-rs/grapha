@@ -314,7 +314,7 @@ fn head_state(repo: &Repository) -> (Option<String>, Option<String>) {
         .map(|oid| oid.to_string());
     let head_ref = head
         .as_ref()
-        .and_then(|head| head.shorthand())
+        .and_then(|head| head.shorthand().ok())
         .map(str::to_string);
     (head_oid, head_ref)
 }
@@ -340,7 +340,7 @@ fn dirty_repo_files(repo: &Repository) -> anyhow::Result<Vec<IndexedRepoFile>> {
     let statuses = repo.statuses(Some(&mut opts))?;
     let mut files = BTreeMap::new();
     for entry in statuses.iter() {
-        let Some(path) = entry.path() else {
+        let Ok(path) = entry.path() else {
             continue;
         };
         let relative = PathBuf::from(path);

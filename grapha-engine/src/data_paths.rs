@@ -54,7 +54,7 @@ pub fn project_identity(project_root: &Path) -> ProjectIdentity {
         .map(|oid| oid.to_string());
     let head_ref = head
         .as_ref()
-        .and_then(|head| head.shorthand())
+        .and_then(|head| head.shorthand().ok())
         .map(str::to_string);
     let branch = head_ref
         .clone()
@@ -186,13 +186,20 @@ fn current_platform() -> Platform {
 fn primary_remote_url(repo: &Repository) -> Option<String> {
     repo.find_remote("origin")
         .ok()
-        .and_then(|remote| remote.url().map(ToOwned::to_owned))
+        .and_then(|remote| remote.url().ok().map(ToOwned::to_owned))
         .or_else(|| {
             let names = repo.remotes().ok()?;
             names
                 .iter()
+                .filter_map(Result::ok)
                 .flatten()
-                .find_map(|name| repo.find_remote(name).ok()?.url().map(ToOwned::to_owned))
+                .find_map(|name| {
+                    repo.find_remote(name)
+                        .ok()?
+                        .url()
+                        .ok()
+                        .map(ToOwned::to_owned)
+                })
         })
         .and_then(|url| non_empty_trimmed(&url).map(ToOwned::to_owned))
 }

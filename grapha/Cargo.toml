@@ -25,8 +25,8 @@ ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-git2 = { version = "0.20", default-features = false }
-rusqlite = { version = "0.39", features = ["bundled"] }
+git2 = { version = "0.21", default-features = false }
+rusqlite = { version = "0.40", features = ["bundled"] }
 tantivy = "0.26"
 indicatif = "0.18"
 toml = "1"
@@ -48,9 +48,9 @@ tree-sitter-ruby = "0.23"
 tree-sitter-typescript = "0.23"
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
-tower-http = { version = "0.6", features = ["cors", "decompression-gzip"] }
+tower-http = { version = "0.7", features = ["cors", "decompression-gzip"] }
 urlencoding = "2"
-langcodec = "0.12"
+langcodec = "0.13"
 xcassets = "0.2"
 
 [dev-dependencies]

@@ -201,7 +201,7 @@ fn discover_source_store(target_project_root: &Path) -> anyhow::Result<SourceSto
     }
 
     if let Ok(names) = repo.worktrees() {
-        for name in names.iter().flatten() {
+        for name in names.iter().filter_map(Result::ok).flatten() {
             let Ok(worktree) = repo.find_worktree(name) else {
                 continue;
             };
