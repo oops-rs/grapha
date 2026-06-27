@@ -67,13 +67,11 @@ fn discover_cargo_modules(root: &Path) -> ModuleMap {
         }
     } else {
         let name = crate::cargo_manifest::package_name_from_table(&parsed, root);
-        let src_dir = root.join("src");
-        let source_dir = if src_dir.is_dir() {
-            src_dir
-        } else {
-            root.to_path_buf()
-        };
-        modules.modules.entry(name).or_default().push(source_dir);
+        modules
+            .modules
+            .entry(name)
+            .or_default()
+            .push(root.to_path_buf());
     }
 
     modules
@@ -91,13 +89,11 @@ fn add_cargo_member(member_path: &Path, modules: &mut ModuleMap) {
                 .unwrap_or("unknown")
                 .to_string()
         });
-    let src_dir = member_path.join("src");
-    let source_dir = if src_dir.is_dir() {
-        src_dir
-    } else {
-        member_path.to_path_buf()
-    };
-    modules.modules.entry(name).or_default().push(source_dir);
+    modules
+        .modules
+        .entry(name)
+        .or_default()
+        .push(member_path.to_path_buf());
 }
 
 #[cfg(test)]
@@ -120,6 +116,12 @@ name = "demo"
 
         let modules = discover_cargo_modules(dir.path());
         assert!(modules.modules.contains_key("demo"));
+        assert_eq!(
+            modules
+                .module_for_file(&dir.path().join("tests/cli.rs"))
+                .as_deref(),
+            Some("demo")
+        );
     }
 
     #[test]
@@ -139,5 +141,17 @@ members = ["crates/*"]
         let modules = discover_cargo_modules(dir.path());
         assert!(modules.modules.contains_key("one"));
         assert!(modules.modules.contains_key("two"));
+        assert_eq!(
+            modules
+                .module_for_file(&dir.path().join("crates/one/tests/cli.rs"))
+                .as_deref(),
+            Some("one")
+        );
+        assert_eq!(
+            modules
+                .module_for_file(&dir.path().join("crates/two/examples/demo.rs"))
+                .as_deref(),
+            Some("two")
+        );
     }
 }
