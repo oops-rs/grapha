@@ -493,6 +493,7 @@ where
         TIMING_INDEXSTORE_NS.fetch_add(t_is.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         if let Some(mut result) = is_result {
+            restamp_indexstore_file_path(&mut result, file_path);
             // Index store doesn't provide doc comments — enrich via tree-sitter.
             // Parse once, share tree across all enrichment passes.
             // Check which enrichment passes are needed before parsing
@@ -618,6 +619,18 @@ where
     Ok(result)
 }
 
+fn restamp_indexstore_file_path(result: &mut ExtractionResult, file_path: &Path) {
+    let file_path = file_path.to_path_buf();
+    for node in &mut result.nodes {
+        node.file = file_path.clone();
+    }
+    for edge in &mut result.edges {
+        for provenance in &mut edge.provenance {
+            provenance.file = file_path.clone();
+        }
+    }
+}
+
 fn enrich_fallback_result(
     source: &[u8],
     file_path: &Path,
@@ -665,7 +678,7 @@ pub fn extract_swift_via_fallback_for_tests(
 
 #[cfg(test)]
 mod plugin_tests {
-    use super::stamp_swift_module;
+    use super::{restamp_indexstore_file_path, stamp_swift_module};
     use grapha_core::ExtractionResult;
     use grapha_core::graph::{Edge, EdgeKind, EdgeProvenance, Node, NodeKind, Span, Visibility};
     use std::collections::HashMap;
@@ -728,6 +741,56 @@ mod plugin_tests {
             "s:4main7package18PackageDescription0C0Cvg@@module:Feature"
         );
         assert_eq!(stamped.nodes[0].module.as_deref(), Some("Feature"));
+    }
+
+    #[test]
+    fn restamps_indexstore_results_to_project_relative_file_path() {
+        let mut result = ExtractionResult {
+            nodes: vec![Node {
+                id: "s:4Room0A4PageV".to_string(),
+                kind: NodeKind::Struct,
+                name: "RoomPage".to_string(),
+                file: PathBuf::from("RoomPage.swift"),
+                span: Span {
+                    start: [20, 0],
+                    end: [42, 0],
+                },
+                visibility: Visibility::Public,
+                metadata: HashMap::new(),
+                role: None,
+                signature: None,
+                doc_comment: None,
+                module: Some("Room".to_string()),
+                snippet: None,
+                repo: None,
+            }],
+            edges: vec![Edge {
+                source: "s:4Room0A4PageV".to_string(),
+                target: "s:4Room0A4PageV4bodyQrvp".to_string(),
+                kind: EdgeKind::Contains,
+                confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
+                provenance: vec![EdgeProvenance {
+                    file: PathBuf::from("RoomPage.swift"),
+                    span: Span {
+                        start: [20, 0],
+                        end: [42, 0],
+                    },
+                    symbol_id: "s:4Room0A4PageV".to_string(),
+                }],
+                repo: None,
+            }],
+            imports: vec![],
+        };
+
+        let relative = std::path::Path::new("Modules/Room/Sources/Room/View/RoomPage.swift");
+        restamp_indexstore_file_path(&mut result, relative);
+
+        assert_eq!(result.nodes[0].file, relative);
+        assert_eq!(result.edges[0].provenance[0].file, relative);
     }
 }
 
