@@ -93,6 +93,10 @@ pub(crate) fn file_matches_query_path(node_file: &std::path::Path, file_query: &
         return true;
     }
 
+    if query.contains('/') {
+        return false;
+    }
+
     let file_name = file.rsplit('/').next().unwrap_or(file.as_str());
     let query_name = query.rsplit('/').next().unwrap_or(query.as_str());
     file_name == query_name

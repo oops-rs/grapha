@@ -162,6 +162,32 @@ mod tests {
     }
 
     #[test]
+    fn path_query_does_not_match_same_basename_in_other_directory() {
+        let graph = Graph {
+            version: String::new(),
+            nodes: vec![
+                make_node(
+                    "src",
+                    "dispatch",
+                    NodeKind::Function,
+                    "apps/nous/src/cli.rs",
+                ),
+                make_node(
+                    "test",
+                    "dispatch_cli_test",
+                    NodeKind::Function,
+                    "apps/nous/tests/cli.rs",
+                ),
+            ],
+            edges: vec![],
+        };
+
+        let result = query_file_symbols(&graph, "apps/nous/src/cli.rs");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.symbols[0].symbol.name, "dispatch");
+    }
+
+    #[test]
     fn excludes_view_and_branch_nodes() {
         let graph = Graph {
             version: String::new(),
