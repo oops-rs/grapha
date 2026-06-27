@@ -768,7 +768,7 @@ fn candidate_matches_hint(
 ) -> bool {
     let normalized_hint = hint.to_ascii_lowercase();
 
-    if normalized_hint == "self" {
+    if matches!(normalized_hint.as_str(), "self" | "this") {
         return source_owner_names.iter().any(|source_owner| {
             candidate_to_owner_names
                 .get(&candidate.id)

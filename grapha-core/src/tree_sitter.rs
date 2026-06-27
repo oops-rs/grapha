@@ -548,6 +548,18 @@ impl ExtractionState<'_> {
     }
 
     fn name_for_node(&self, node: TsNode) -> Option<String> {
+        if self.config.id == "kotlin" && node.kind() == "secondary_constructor" {
+            return Some("constructor".to_string());
+        }
+        if self.config.id == "kotlin" && node.kind() == "companion_object" {
+            return node
+                .child_by_field_name(self.config.name_field)
+                .or_else(|| node.child_by_field_name("name"))
+                .and_then(|child| terminal_name(child, self.source))
+                .map(clean_identifier)
+                .filter(|name| !name.is_empty())
+                .or_else(|| Some("Companion".to_string()));
+        }
         node.child_by_field_name(self.config.name_field)
             .or_else(|| node.child_by_field_name("name"))
             .or_else(|| node.child_by_field_name("declarator"))
@@ -1191,6 +1203,10 @@ fn descendants_with_kinds<'tree>(node: TsNode<'tree>, kinds: &[&str]) -> Vec<TsN
 }
 
 fn callee_name(node: TsNode, source: &[u8]) -> Option<String> {
+    if let Some(qualified) = qualified_method_invocation_name(node, source) {
+        return Some(qualified);
+    }
+
     node.child_by_field_name("function")
         .or_else(|| node.child_by_field_name("name"))
         .or_else(|| node.child_by_field_name("method"))
@@ -1199,8 +1215,39 @@ fn callee_name(node: TsNode, source: &[u8]) -> Option<String> {
             let mut cursor = node.walk();
             node.named_children(&mut cursor).next()
         })
-        .and_then(|callee| terminal_name(callee, source))
+        .and_then(|callee| qualified_or_terminal_name(callee, source))
         .map(clean_identifier)
+}
+
+fn qualified_method_invocation_name(node: TsNode, source: &[u8]) -> Option<String> {
+    let object = node
+        .child_by_field_name("object")
+        .or_else(|| node.child_by_field_name("receiver"))?;
+    let member = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("method"))
+        .or_else(|| node.child_by_field_name("selector"))?;
+    let object = qualified_or_terminal_name(object, source)?;
+    let member = terminal_name(member, source)?;
+    Some(format!("{object}.{member}"))
+}
+
+fn qualified_or_terminal_name(node: TsNode, source: &[u8]) -> Option<String> {
+    if matches!(
+        node.kind(),
+        "member_expression"
+            | "selector_expression"
+            | "field_expression"
+            | "navigation_expression"
+            | "qualified_identifier"
+            | "scoped_identifier"
+    ) && let Some(raw) = text(node, source)
+    {
+        let compact = raw.chars().filter(|ch| !ch.is_whitespace()).collect();
+        return Some(compact);
+    }
+
+    terminal_name(node, source)
 }
 
 fn should_skip_call(name: &str) -> bool {

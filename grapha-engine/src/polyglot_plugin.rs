@@ -1,7 +1,10 @@
+use std::path::Path;
+
 use grapha_core::graph::NodeKind;
 use grapha_core::{
     ExtractionResult, FileContext, GenericTreeSitterExtractor, LanguageExtractor, LanguagePlugin,
-    LanguageRegistry, TreeSitterLanguageConfig,
+    LanguageRegistry, ModuleMap, ProjectContext, SemanticAnnotation, SemanticDocument,
+    TreeSitterLanguageConfig,
 };
 
 pub struct PolyglotPlugin;
@@ -19,6 +22,10 @@ impl LanguagePlugin for PolyglotPlugin {
         ]
     }
 
+    fn discover_modules(&self, context: &ProjectContext) -> anyhow::Result<ModuleMap> {
+        Ok(discover_gradle_modules(&context.project_root))
+    }
+
     fn extract(&self, source: &[u8], context: &FileContext) -> anyhow::Result<ExtractionResult> {
         let config = config_for_path(&context.relative_path, source).ok_or_else(|| {
             anyhow::anyhow!(
@@ -28,6 +35,21 @@ impl LanguagePlugin for PolyglotPlugin {
         })?;
         let extractor = GenericTreeSitterExtractor { config };
         extractor.extract(source, &context.relative_path)
+    }
+
+    fn extract_semantics(
+        &self,
+        source: &[u8],
+        context: &FileContext,
+    ) -> anyhow::Result<SemanticDocument> {
+        let mut document = SemanticDocument::from_extraction_result(self.extract(source, context)?);
+        if is_android_source_path(&context.relative_path) {
+            annotate_android_entries(&mut document);
+            document.annotate_call_relations(|relation, _source| {
+                crate::classify::android::terminal_effect_for_target(relation.target.as_raw())
+            });
+        }
+        Ok(document)
     }
 }
 
@@ -73,6 +95,179 @@ fn looks_like_cpp(source: &[u8]) -> bool {
         || sample.contains("protected:")
         || sample.contains("virtual ")
         || sample.contains("using namespace")
+}
+
+fn is_android_source_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("kt" | "kts" | "java")
+    )
+}
+
+fn annotate_android_entries(document: &mut SemanticDocument) {
+    for symbol in &mut document.symbols {
+        if android_entry_symbol(symbol) {
+            symbol.annotations.push(SemanticAnnotation::EntryPoint);
+        }
+    }
+}
+
+fn android_entry_symbol(symbol: &grapha_core::SemanticSymbol) -> bool {
+    if symbol
+        .annotations
+        .iter()
+        .any(|annotation| matches!(annotation, SemanticAnnotation::EntryPoint))
+    {
+        return false;
+    }
+
+    match symbol.kind {
+        NodeKind::Function => {
+            is_android_lifecycle_method(&symbol.name)
+                || symbol
+                    .signature
+                    .as_deref()
+                    .is_some_and(|signature| signature.contains("@Composable"))
+        }
+        NodeKind::Class => is_android_component_name(&symbol.name),
+        _ => false,
+    }
+}
+
+fn is_android_lifecycle_method(name: &str) -> bool {
+    matches!(
+        name,
+        "onCreate"
+            | "onStart"
+            | "onResume"
+            | "onPause"
+            | "onStop"
+            | "onDestroy"
+            | "onRestart"
+            | "onAttach"
+            | "onDetach"
+            | "onCreateView"
+            | "onViewCreated"
+            | "onActivityCreated"
+            | "onNewIntent"
+            | "onActivityResult"
+            | "onRequestPermissionsResult"
+            | "onReceive"
+            | "onBind"
+            | "onStartCommand"
+            | "onHandleIntent"
+            | "doWork"
+            | "onClick"
+            | "onItemClick"
+            | "onCheckedChanged"
+            | "onPageSelected"
+    )
+}
+
+fn is_android_component_name(name: &str) -> bool {
+    [
+        "Activity",
+        "Fragment",
+        "Service",
+        "Receiver",
+        "Application",
+        "Worker",
+        "ViewModel",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+}
+
+fn discover_gradle_modules(root: &Path) -> ModuleMap {
+    let mut modules = ModuleMap::new();
+    if !has_gradle_marker(root) {
+        return modules;
+    }
+    discover_gradle_modules_in(root, root, &mut modules);
+    modules
+}
+
+fn discover_gradle_modules_in(root: &Path, dir: &Path, modules: &mut ModuleMap) {
+    if is_skipped_gradle_dir(dir) {
+        return;
+    }
+
+    if is_gradle_module_dir(dir) {
+        let name = gradle_module_name(root, dir);
+        modules
+            .modules
+            .entry(name)
+            .or_default()
+            .push(dir.to_path_buf());
+    }
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            discover_gradle_modules_in(root, &path, modules);
+        }
+    }
+}
+
+fn has_gradle_marker(root: &Path) -> bool {
+    [
+        "settings.gradle",
+        "settings.gradle.kts",
+        "build.gradle",
+        "build.gradle.kts",
+    ]
+    .iter()
+    .any(|file| root.join(file).is_file())
+}
+
+fn is_gradle_module_dir(dir: &Path) -> bool {
+    dir.join("build.gradle").is_file()
+        || dir.join("build.gradle.kts").is_file()
+        || dir.join("src/main/AndroidManifest.xml").is_file()
+}
+
+fn is_skipped_gradle_dir(dir: &Path) -> bool {
+    dir.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, ".git" | ".gradle" | "build" | "node_modules"))
+}
+
+fn gradle_module_name(root: &Path, dir: &Path) -> String {
+    if dir == root {
+        return root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("root")
+            .to_string();
+    }
+
+    dir.strip_prefix(root)
+        .ok()
+        .map(path_components)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| {
+            dir.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        })
+}
+
+fn path_components(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn ts_language() -> tree_sitter::Language {
@@ -229,18 +424,26 @@ const JAVA: TreeSitterLanguageConfig = TreeSitterLanguageConfig {
     id: "java",
     language: java_language,
     function_types: EMPTY,
-    class_types: &["class_declaration"],
-    method_types: &["method_declaration", "constructor_declaration"],
+    class_types: &[
+        "class_declaration",
+        "record_declaration",
+        "annotation_type_declaration",
+    ],
+    method_types: &[
+        "method_declaration",
+        "constructor_declaration",
+        "compact_constructor_declaration",
+    ],
     interface_types: &["interface_declaration"],
     interface_kind: NodeKind::Trait,
     struct_types: EMPTY,
     enum_types: &["enum_declaration"],
-    enum_member_types: EMPTY,
+    enum_member_types: &["enum_constant"],
     type_alias_types: EMPTY,
     import_types: &["import_declaration"],
     call_types: &["method_invocation"],
     variable_types: &["local_variable_declaration"],
-    field_types: &["field_declaration"],
+    field_types: &["field_declaration", "constant_declaration"],
     property_types: EMPTY,
     extra_class_types: EMPTY,
     name_field: "name",
@@ -358,22 +561,22 @@ const KOTLIN: TreeSitterLanguageConfig = TreeSitterLanguageConfig {
     language: kotlin_language,
     function_types: &["function_declaration"],
     class_types: &["class_declaration"],
-    method_types: &["function_declaration"],
+    method_types: &["function_declaration", "secondary_constructor"],
     interface_types: EMPTY,
     interface_kind: NodeKind::Trait,
     struct_types: EMPTY,
     enum_types: EMPTY,
-    enum_member_types: EMPTY,
+    enum_member_types: &["enum_entry"],
     type_alias_types: &["type_alias"],
     import_types: &["import_header"],
     call_types: &["call_expression"],
     variable_types: &["property_declaration"],
     field_types: &["property_declaration"],
     property_types: EMPTY,
-    extra_class_types: &["object_declaration"],
+    extra_class_types: &["object_declaration", "companion_object"],
     name_field: "name",
     body_field: "body",
-    methods_are_top_level: false,
+    methods_are_top_level: true,
 };
 
 const DART: TreeSitterLanguageConfig = TreeSitterLanguageConfig {
@@ -429,6 +632,7 @@ const PASCAL: TreeSitterLanguageConfig = TreeSitterLanguageConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn routes_h_header_to_cpp_when_it_uses_cpp_constructs() {
@@ -446,5 +650,38 @@ mod tests {
         let config = config_for_path(std::path::Path::new("widget.h"), b"struct Widget;").unwrap();
 
         assert_eq!(config.id, "c");
+    }
+
+    #[test]
+    fn discovers_gradle_module_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("settings.gradle"),
+            "include ':app', ':module:share'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("build.gradle"), "").unwrap();
+        fs::create_dir_all(dir.path().join("app/src/main/java")).unwrap();
+        fs::write(dir.path().join("app/build.gradle"), "").unwrap();
+        fs::create_dir_all(dir.path().join("module/share/src/main/java")).unwrap();
+        fs::write(dir.path().join("module/share/build.gradle"), "").unwrap();
+        fs::create_dir_all(dir.path().join("build/generated")).unwrap();
+        fs::write(dir.path().join("build/generated/build.gradle"), "").unwrap();
+
+        let modules = discover_gradle_modules(dir.path());
+
+        assert_eq!(
+            modules
+                .module_for_file(&dir.path().join("app/src/main/java/MainActivity.kt"))
+                .as_deref(),
+            Some("app")
+        );
+        assert_eq!(
+            modules
+                .module_for_file(&dir.path().join("module/share/src/main/java/Share.kt"))
+                .as_deref(),
+            Some("module:share")
+        );
+        assert!(!modules.modules.contains_key("build:generated"));
     }
 }

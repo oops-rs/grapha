@@ -44,6 +44,33 @@ fn has_call(graph: &Value, source_name: &str, target_name: &str) -> bool {
     })
 }
 
+fn lacks_call(graph: &Value, source_name: &str, target_name: &str) -> bool {
+    !has_call(graph, source_name, target_name)
+}
+
+fn has_entry_role(graph: &Value, name: &str) -> bool {
+    graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["name"] == name && node["role"]["type"] == "entry_point")
+}
+
+fn has_module(graph: &Value, name: &str, module: &str) -> bool {
+    graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["name"] == name && node["module"] == module)
+}
+
+fn has_call_operation(graph: &Value, source_name: &str, operation: &str) -> bool {
+    let source_id = node_id(graph, source_name);
+    graph["edges"].as_array().unwrap().iter().any(|edge| {
+        edge["kind"] == "calls" && edge["source"] == source_id && edge["operation"] == operation
+    })
+}
+
 #[test]
 fn smoke_analyzes_codegraph_tree_sitter_language_set() {
     let dir = tempfile::tempdir().unwrap();
@@ -251,4 +278,149 @@ fn analyzes_python_and_java_files_in_the_same_project() {
     assert!(has_node(&graph, "run", "function"));
     assert!(has_node(&graph, "helper", "function"));
     assert!(has_call(&graph, "run", "helper"));
+}
+
+#[test]
+fn indexes_android_kotlin_and_java_constructs() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("settings.gradle"), "include ':app'\n").unwrap();
+    std::fs::write(dir.path().join("build.gradle"), "").unwrap();
+    std::fs::create_dir_all(dir.path().join("app")).unwrap();
+    std::fs::write(dir.path().join("app/build.gradle"), "").unwrap();
+    let kotlin_dir = dir.path().join("app/src/main/java/com/example/game");
+    std::fs::create_dir_all(&kotlin_dir).unwrap();
+    std::fs::write(
+        kotlin_dir.join("MainActivity.kt"),
+        r#"
+            package com.example.game
+
+            import androidx.appcompat.app.AppCompatActivity
+
+            val topLevelToken = "game"
+
+            fun bootstrap() {
+                topLevelToken.toString()
+            }
+
+            class MainActivity : AppCompatActivity() {
+                val viewModel = GameViewModel()
+
+                constructor(name: String) : this() {
+                    render()
+                }
+
+                fun onCreate() {
+                    render()
+                }
+
+                private fun render() {
+                    bootstrap()
+                    SessionStore.load()
+                    dynamicLinkPrefix.isNullOrEmpty()
+                }
+
+                companion object {
+                    const val TAG = "MainActivity"
+
+                    fun launch() {
+                        bootstrap()
+                    }
+                }
+            }
+
+            object SessionStore {
+                fun load() {}
+            }
+
+            object QMUILangHelper {
+                fun isNullOrEmpty(value: String): Boolean = value.isEmpty()
+            }
+
+            interface GameRepository {
+                fun games(): List<String>
+            }
+
+            enum class GameState {
+                Waiting,
+                Running
+            }
+
+            typealias PlayerId = String
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        kotlin_dir.join("JavaActivity.java"),
+        r#"
+            package com.example.game;
+
+            import android.app.Activity;
+            import okhttp3.OkHttpClient;
+
+            public class JavaActivity extends Activity {
+                private String title;
+
+                public JavaActivity() {
+                    onStart();
+                }
+
+                public void onStart() {
+                    helper();
+                    startActivity(null);
+                    getSharedPreferences("prefs", 0).edit().putString("id", "1");
+                    new OkHttpClient().newCall(null).enqueue(null);
+                }
+
+                private void helper() {}
+            }
+
+            public record PlayerRecord(String id) {
+                public PlayerRecord {
+                    validate(id);
+                }
+            }
+
+            enum JavaState {
+                READY,
+                DONE
+            }
+        "#,
+    )
+    .unwrap();
+
+    let graph = analyze(dir.path());
+
+    assert!(has_node(&graph, "MainActivity", "class"));
+    assert!(has_node(&graph, "GameRepository", "trait"));
+    assert!(has_node(&graph, "GameState", "enum"));
+    assert!(has_node(&graph, "Waiting", "variant"));
+    assert!(has_node(&graph, "SessionStore", "class"));
+    assert!(has_node(&graph, "Companion", "class"));
+    assert!(has_node(&graph, "constructor", "function"));
+    assert!(has_node(&graph, "onCreate", "function"));
+    assert!(has_node(&graph, "render", "function"));
+    assert!(has_node(&graph, "launch", "function"));
+    assert!(has_node(&graph, "load", "function"));
+    assert!(has_node(&graph, "bootstrap", "function"));
+    assert!(has_node(&graph, "topLevelToken", "variable"));
+    assert!(has_node(&graph, "viewModel", "field"));
+    assert!(has_node(&graph, "TAG", "field"));
+    assert!(has_node(&graph, "PlayerId", "type_alias"));
+    assert!(has_node(&graph, "JavaActivity", "class"));
+    assert!(has_node(&graph, "PlayerRecord", "class"));
+    assert!(has_node(&graph, "JavaState", "enum"));
+    assert!(has_node(&graph, "READY", "variant"));
+    assert!(has_call(&graph, "onCreate", "render"));
+    assert!(has_call(&graph, "render", "bootstrap"));
+    assert!(has_call(&graph, "render", "load"));
+    assert!(lacks_call(&graph, "render", "isNullOrEmpty"));
+    assert!(has_call(&graph, "onStart", "helper"));
+    assert!(has_entry_role(&graph, "MainActivity"));
+    assert!(has_entry_role(&graph, "onCreate"));
+    assert!(has_entry_role(&graph, "JavaActivity"));
+    assert!(has_entry_role(&graph, "onStart"));
+    assert!(has_module(&graph, "MainActivity", "app"));
+    assert!(has_call_operation(&graph, "onStart", "http"));
+    assert!(has_call_operation(&graph, "onStart", "storage"));
+    assert!(has_call_operation(&graph, "onStart", "event"));
 }
