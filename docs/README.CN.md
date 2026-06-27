@@ -271,9 +271,9 @@ operation = "set"
 
 ```text
 grapha-core/     共享图、提取、语义、选择器和插件类型
-grapha-rust/     Rust 插件和 tree-sitter 提取器包
 grapha-swift/    Swift 提取：Index Store -> SwiftSyntax -> tree-sitter
-grapha/          CLI、查询引擎、持久化、MCP 服务器和 Web UI
+grapha-engine/   库引擎：提取、查询引擎、持久化和语言插件
+grapha/          CLI、MCP 服务器和 Web UI
 nodus/           智能体工具包，包含 skills、rules 和 commands
 ```
 

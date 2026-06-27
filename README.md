@@ -342,9 +342,9 @@ Global developer defaults can live in `$GRAPHA_CONFIG`, `$XDG_CONFIG_HOME/grapha
 
 ```text
 grapha-core/     Shared graph, extraction, semantic, selector, and plugin types
-grapha-rust/     Rust plugin and tree-sitter extractor package
 grapha-swift/    Swift extraction: index store -> SwiftSyntax -> tree-sitter
-grapha/          CLI binary, query engines, persistence, MCP server, and web UI
+grapha-engine/   Library engine: extraction, query engines, persistence, and language plugins
+grapha/          CLI binary, MCP server, and web UI
 nodus/           Agent tooling package with skills, rules, and commands
 ```
 

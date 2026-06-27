@@ -1037,7 +1037,6 @@ dependencies = [
  "flate2",
  "git2",
  "grapha-core",
- "grapha-rust",
  "grapha-swift",
  "ignore",
  "indicatif",
@@ -1071,19 +1070,6 @@ dependencies = [
  "tree-sitter-typescript",
  "urlencoding",
  "xcassets",
-]
-
-[[package]]
-name = "grapha-rust"
-version = "0.4.2"
-dependencies = [
- "anyhow",
- "grapha-core",
- "regex",
- "tempfile",
- "toml",
- "tree-sitter",
- "tree-sitter-rust",
 ]
 
 [[package]]

@@ -157,7 +157,7 @@ impl Op {
 /// The per-language quality tier grapha provides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LanguageTier {
-    /// Deep, language-aware extraction (Rust via grapha-rust, Swift via
+    /// Deep, language-aware extraction (Rust via tree-sitter, Swift via
     /// libIndexStore + SwiftSyntax): full graph ops.
     Deep,
     /// Tree-sitter-only structural extraction: symbol/context/usages are

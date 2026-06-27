@@ -2,7 +2,6 @@
 name = "grapha-engine"
 version = "0.4.2"
 edition = "2024"
-publish = false
 description = "Library engine for Grapha code intelligence"
 license = "MIT"
 repository = "https://github.com/oops-rs/grapha"
@@ -13,7 +12,6 @@ categories = ["development-tools"]
 
 [dependencies]
 grapha-core = { version = "0.4.2", path = "../grapha-core" }
-grapha-rust = { version = "0.4.2", path = "../grapha-rust" }
 grapha-swift = { version = "0.4.2", path = "../grapha-swift", optional = true }
 anyhow = "1"
 bincode = { version = "2", features = ["serde"] }
