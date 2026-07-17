@@ -14,6 +14,7 @@ pub mod data_paths;
 pub mod delta;
 pub mod discover;
 pub mod extract;
+pub mod extractor;
 pub mod fields;
 pub mod filter;
 pub mod history;
