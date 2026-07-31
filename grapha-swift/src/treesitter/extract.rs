@@ -463,7 +463,33 @@ fn swift_declaration_metadata(node: tree_sitter::Node, source: &[u8]) -> HashMap
     {
         metadata.insert("static".to_string(), "true".to_string());
     }
+    if node.kind() == "property_declaration"
+        && let Some(declared_type) = explicit_property_declared_type(node, source)
+    {
+        metadata.insert("grapha.declared_type".to_string(), declared_type);
+    }
     metadata
+}
+
+/// Return the explicit type annotation of a stored or computed property.
+///
+/// Swift's existential spelling adds `any` before the nominal type, but that
+/// prefix is not part of the type's identity for later receiver binding. Keep
+/// the rest of the annotation intact so generic, optional, and collection
+/// types are not guessed at or discarded.
+fn explicit_property_declared_type(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    let annotation = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "type_annotation")?;
+    let raw = annotation.utf8_text(source).ok()?.trim();
+    let type_text = raw.trim_start_matches(':').trim();
+    let normalized = type_text
+        .strip_prefix("any ")
+        .or_else(|| type_text.strip_prefix("some "))
+        .unwrap_or(type_text)
+        .trim();
+    (!normalized.is_empty()).then(|| normalized.to_string())
 }
 
 /// Extract struct or class declaration.
@@ -1168,25 +1194,24 @@ fn extract_import(
         .unwrap_or_default()
         .trim()
         .to_string();
-    // The import path is in the identifier > simple_identifier child
+    // The import path is in the identifier > simple_identifier child. An
+    // explicit Swift import kind (`import class Module.Symbol`) makes the
+    // final path component a declaration; an unqualified import path stays a
+    // module import because the grammar alone cannot distinguish a submodule
+    // from a declaration.
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() == "identifier"
             && let Ok(path_text) = child.utf8_text(source)
         {
             let path = path_text.to_string();
+            let import = swift_import(node, &path);
             if !push_import_node(result, file, node, &path, &signature) {
                 continue;
             }
 
-            if !result.imports.iter().any(|import| {
-                import.path == path && import.kind == grapha_core::resolve::ImportKind::Module
-            }) {
-                result.imports.push(grapha_core::resolve::Import {
-                    path: path.clone(),
-                    symbols: vec![],
-                    kind: grapha_core::resolve::ImportKind::Module,
-                });
+            if !result.imports.iter().any(|existing| existing == &import) {
+                result.imports.push(import);
             }
 
             result.edges.push(Edge {
@@ -1203,6 +1228,36 @@ fn extract_import(
             });
         }
     }
+}
+
+fn swift_import(node: tree_sitter::Node, raw_path: &str) -> grapha_core::resolve::Import {
+    if has_explicit_import_kind(node)
+        && let Some((module_path, symbol)) = raw_path.rsplit_once('.')
+        && !module_path.is_empty()
+        && !symbol.is_empty()
+    {
+        return grapha_core::resolve::Import {
+            path: module_path.to_string(),
+            symbols: vec![symbol.to_string()],
+            kind: grapha_core::resolve::ImportKind::Named,
+        };
+    }
+
+    grapha_core::resolve::Import {
+        path: raw_path.to_string(),
+        symbols: vec![],
+        kind: grapha_core::resolve::ImportKind::Module,
+    }
+}
+
+fn has_explicit_import_kind(node: tree_sitter::Node) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).any(|child| {
+        matches!(
+            child.kind(),
+            "typealias" | "struct" | "class" | "enum" | "protocol" | "let" | "var" | "func"
+        )
+    })
 }
 
 fn push_import_node(
@@ -1597,9 +1652,8 @@ fn extract_calls(
     result: &mut ExtractionResult,
 ) {
     if node.kind() == "call_expression"
-        && let Some(fn_name) = simple_identifier_text(node, source)
+        && let Some(target_id) = swift_call_target(node, source, file, module_path)
     {
-        let target_id = make_id(file, module_path, &fn_name);
         let condition = find_enclosing_swift_condition(node, source);
         let async_boundary = detect_swift_async_boundary(node, source);
         result.edges.push(Edge {
@@ -1684,5 +1738,55 @@ fn extract_calls(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         extract_calls(child, source, file, module_path, caller_id, result);
+    }
+}
+
+/// Return the raw call target for a Swift call expression.
+///
+/// Bare calls deliberately retain the existing file-scoped target. A member
+/// call has a `navigation_expression` callee instead of a direct
+/// `simple_identifier`; keep its receiver-qualified spelling so merge can use
+/// property type metadata rather than resolving by the method name alone.
+fn swift_call_target(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+) -> Option<String> {
+    if let Some(fn_name) = simple_identifier_text(node, source) {
+        return Some(make_id(file, module_path, &fn_name));
+    }
+
+    let mut cursor = node.walk();
+    let callee = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "navigation_expression")?;
+    navigation_call_target(callee, source)
+}
+
+/// Build a clean receiver/member chain from the grammar's navigation nodes.
+///
+/// A navigation target can be another navigation expression, yielding chains
+/// such as `session.events.observe`. Calls on arbitrary expressions (for
+/// example `makeSession().leave()`) deliberately return `None`: they do not
+/// identify a stable receiver property for merge-time type binding.
+fn navigation_call_target(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let mut components = navigation_target_components(node.child_by_field_name("target")?, source)?;
+    let suffix = node.child_by_field_name("suffix")?;
+    let member = simple_identifier_text(suffix, source)?;
+    components.push(member);
+    (components.len() >= 2).then(|| components.join("."))
+}
+
+fn navigation_target_components(node: tree_sitter::Node, source: &[u8]) -> Option<Vec<String>> {
+    match node.kind() {
+        "navigation_expression" => navigation_call_target(node, source)
+            .map(|target| target.split('.').map(str::to_string).collect()),
+        "simple_identifier" | "self_expression" | "super_expression" => node
+            .utf8_text(source)
+            .ok()
+            .map(|name| vec![name.to_string()]),
+        "user_type" => type_identifier_text(node, source).map(|name| vec![name]),
+        _ => None,
     }
 }

@@ -1,7 +1,52 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::extract::ExtractionResult;
 use crate::graph::{EdgeKind, Graph, NodeKind};
+
+/// A source-proven reason that an input edge produced no merged graph edge.
+///
+/// The absence of a reason bucket does not mean a dropped edge was ignored:
+/// some resolution policies deliberately reject a possible binding without a
+/// stable, public diagnosis. Those drops remain in MergeStats' total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UnresolvedEdgeDropReason {
+    /// No resolvable graph node has the target symbol name.
+    NoCandidate,
+    /// More than three files contain otherwise eligible candidates.
+    AmbiguousMoreThanThreeFiles,
+}
+
+/// Deterministic accounting produced while merging extraction results.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MergeStats {
+    /// Number of edges supplied by all input extraction results before merge.
+    pub input_edge_count: usize,
+    /// Number of input edges that emitted no graph edge because they could not
+    /// be safely resolved by merge.
+    pub dropped_unresolved_edge_count: usize,
+    /// Counts for the subset of dropped edges whose cause is proven directly
+    /// by merge source logic. A BTreeMap keeps iteration deterministic.
+    pub dropped_unresolved_edge_count_by_reason: BTreeMap<UnresolvedEdgeDropReason, usize>,
+}
+
+impl MergeStats {
+    fn record_dropped_unresolved_edge(&mut self, reason: Option<UnresolvedEdgeDropReason>) {
+        self.dropped_unresolved_edge_count += 1;
+        if let Some(reason) = reason {
+            *self
+                .dropped_unresolved_edge_count_by_reason
+                .entry(reason)
+                .or_default() += 1;
+        }
+    }
+}
+
+/// Graph output together with merge-time accounting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeOutcome {
+    pub graph: Graph,
+    pub stats: MergeStats,
+}
 
 struct NameEntry {
     id: String,
@@ -17,6 +62,52 @@ struct ResolveContext<'a> {
     source_owner_names: &'a [String],
     candidate_to_owner_names: &'a HashMap<String, Vec<String>>,
     candidate_file_stems: &'a HashMap<String, String>,
+}
+
+struct CandidateResolution {
+    candidates: Vec<(String, f64)>,
+    drop_reason: Option<UnresolvedEdgeDropReason>,
+}
+
+/// Result of handling a syntactically simple receiver call such as
+/// `room_session.leave`. These calls carry stronger information than a bare
+/// member name, but only when the receiver can be proved to be a typed member
+/// of the caller's enclosing type.
+enum TypedReceiverCallResolution {
+    /// The target is not a receiver call handled by this conservative path.
+    /// Existing import/static-member resolution may still apply.
+    NotApplicable,
+    /// A single statically declared member was proved to be the target.
+    Resolved(String),
+    /// The target looked like an instance receiver call, but its receiver or
+    /// declared type could not be proved. Do not fall back to name guessing.
+    Rejected,
+}
+
+struct TypedReceiverContext<'a> {
+    source_module: Option<&'a str>,
+    name_to_entries: &'a HashMap<&'a str, Vec<NameEntry>>,
+    child_to_parents: &'a HashMap<String, Vec<String>>,
+    id_to_info: &'a HashMap<&'a str, (Option<&'a str>, &'a str)>,
+    id_to_name: &'a HashMap<&'a str, &'a str>,
+    id_to_kind: &'a HashMap<&'a str, NodeKind>,
+    id_to_metadata: &'a HashMap<&'a str, &'a HashMap<String, String>>,
+}
+
+impl CandidateResolution {
+    fn resolved(candidates: Vec<(String, f64)>) -> Self {
+        Self {
+            candidates,
+            drop_reason: None,
+        }
+    }
+
+    fn dropped(drop_reason: Option<UnresolvedEdgeDropReason>) -> Self {
+        Self {
+            candidates: Vec::new(),
+            drop_reason,
+        }
+    }
 }
 
 fn looks_like_file_path(segment: &str) -> bool {
@@ -403,8 +494,299 @@ fn single<T>(items: &[T]) -> Option<&T> {
     (items.len() == 1).then(|| &items[0])
 }
 
+/// A call target is owner-local only when it is either a simple callee name,
+/// or the Swift fallback's synthetic `source-file::callee` form. The latter
+/// is safe only when its file prefix exactly matches the caller's own source
+/// file. Static calls (`Type.method`), instance/super calls
+/// (`receiver.method`) and every other qualified target retain their
+/// qualification because it changes binding semantics.
+fn is_truly_bare_call_target(target: &str, source_file: &str) -> bool {
+    is_simple_identifier(target)
+        || (!source_file.is_empty()
+            && target
+                .strip_prefix(source_file)
+                .and_then(|suffix| suffix.strip_prefix("::"))
+                .is_some_and(is_simple_identifier))
+}
+
+/// After import and typed-receiver binding fail, a qualified call still carries
+/// receiver/path semantics that a terminal-name search cannot prove. The Swift
+/// proof-gated path keeps its synthetic `source-file::callee` bare form eligible
+/// for normal owner-local/bare resolution, but drops every other dotted or
+/// path-qualified call instead of fanning it out to unrelated same-named methods.
+fn is_unresolved_qualified_call_target(target: &str, source_file: &str) -> bool {
+    !is_truly_bare_call_target(target, source_file)
+        && (target.contains('.') || target.contains("::"))
+}
+
+/// The Swift fallback is the only current extractor that preserves member-call
+/// receiver shape while also attaching the explicit property-type facts used by
+/// the proof paths below. Keep its unresolved qualified calls out of the
+/// generic terminal-name fallback. Other generic parsers retain their legacy
+/// behavior until they carry equivalent receiver-form evidence (for example,
+/// constructor/static dispatch provenance) rather than losing safe calls.
+fn uses_proof_gated_qualified_call_resolution(source_file: &str) -> bool {
+    source_file.ends_with(".swift")
+}
+
+/// A `super.member` call has a semantic receiver, but tree-sitter alone does
+/// not establish which superclass declaration owns that member. Once import
+/// binding has failed, resolving it by the terminal member name would invent
+/// unrelated intra-module call edges.
+fn is_unresolved_simple_super_call(target: &str) -> bool {
+    target
+        .strip_prefix("super.")
+        .is_some_and(is_simple_identifier)
+}
+
+fn is_callable_member_kind(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Function | NodeKind::Method)
+}
+
+fn is_receiver_dispatch_type_kind(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Protocol
+    )
+}
+
+fn is_field_or_property_kind(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Field | NodeKind::Property)
+}
+
+/// Return the sole direct `Contains` parent. Multiple containment edges are
+/// intentionally treated as ambiguous rather than selecting one by name.
+fn direct_parent_id<'a>(
+    child_id: &str,
+    child_to_parents: &'a HashMap<String, Vec<String>>,
+) -> Option<&'a str> {
+    single(child_to_parents.get(child_id)?).map(String::as_str)
+}
+
+/// Resolve a bare call to the unique callable member which shares the exact
+/// same direct container id as the caller. Exact ids (rather than owner names)
+/// prevent two same-named types in a module from leaking calls into each other.
+fn resolve_bare_owner_local_call(
+    raw_target: &str,
+    source_id: &str,
+    source_file: &str,
+    source_module: Option<&str>,
+    candidates: &[NameEntry],
+    child_to_parents: &HashMap<String, Vec<String>>,
+    id_to_kind: &HashMap<&str, NodeKind>,
+) -> Option<String> {
+    if !is_truly_bare_call_target(raw_target, source_file) {
+        return None;
+    }
+    let source_parent = direct_parent_id(source_id, child_to_parents)?;
+    let matching: Vec<&NameEntry> = candidates
+        .iter()
+        .filter(|candidate| modules_match(source_module, candidate.module.as_deref()))
+        .filter(|candidate| {
+            id_to_kind
+                .get(candidate.id.as_str())
+                .is_some_and(|kind| is_callable_member_kind(*kind))
+        })
+        .filter(|candidate| {
+            direct_parent_id(&candidate.id, child_to_parents) == Some(source_parent)
+        })
+        .collect();
+
+    single(&matching).map(|candidate| candidate.id.clone())
+}
+
+/// Parse only a simple, one-hop receiver expression. Chained receivers and
+/// paths are deliberately left to their dedicated resolver paths: they cannot
+/// be grounded in one declared field/property without type-flow inference.
+fn simple_receiver_call(target: &str) -> Option<(&str, &str)> {
+    if target.contains("::") {
+        return None;
+    }
+    let (receiver, member) = target.split_once('.')?;
+    if member.contains('.')
+        || !is_simple_identifier(receiver)
+        || !is_simple_identifier(member)
+        || matches!(receiver, "self" | "super" | "this")
+    {
+        return None;
+    }
+    Some((receiver, member))
+}
+
+fn is_simple_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+/// The Swift tree-sitter extractor normalizes `any Protocol` to `Protocol`,
+/// but accept the unambiguous spelling as well for callers that provide raw
+/// metadata. Generic/composite/function types are rejected instead of guessing
+/// at an erased nominal owner.
+fn nominal_declared_type(declared_type: &str) -> Option<&str> {
+    let declared_type = declared_type.trim();
+    let declared_type = declared_type
+        .strip_prefix("any ")
+        .or_else(|| declared_type.strip_prefix("some "))
+        .unwrap_or(declared_type)
+        .trim();
+    let declared_type = declared_type
+        .strip_suffix('?')
+        .or_else(|| declared_type.strip_suffix('!'))
+        .unwrap_or(declared_type)
+        .trim();
+    is_simple_identifier(declared_type).then_some(declared_type)
+}
+
+/// Find the one canonical type with this nominal name in the caller's module.
+/// Extensions and implementations are intentionally excluded: receiver method
+/// dispatch is bound to the statically declared type/protocol, never every
+/// implementation that happens to have the same member name.
+fn unique_same_module_receiver_type_id(
+    type_name: &str,
+    module: Option<&str>,
+    name_to_entries: &HashMap<&str, Vec<NameEntry>>,
+    id_to_kind: &HashMap<&str, NodeKind>,
+) -> Option<String> {
+    let candidates: Vec<&NameEntry> = name_to_entries
+        .get(type_name)?
+        .iter()
+        .filter(|candidate| modules_match(module, candidate.module.as_deref()))
+        .filter(|candidate| {
+            id_to_kind
+                .get(candidate.id.as_str())
+                .is_some_and(|kind| is_receiver_dispatch_type_kind(*kind))
+        })
+        .collect();
+    single(&candidates).map(|candidate| candidate.id.clone())
+}
+
+/// Return the canonical type that owns a caller. Normally this is its direct
+/// `Contains` parent. Swift allows methods to sit in an `Extension` while the
+/// stored property lives on the base class; bridge that shape only when the
+/// extension name and module identify exactly one canonical base type.
+fn receiver_owner_type_id(source_id: &str, context: &TypedReceiverContext<'_>) -> Option<String> {
+    let owner_id = direct_parent_id(source_id, context.child_to_parents)?;
+    let owner_kind = *context.id_to_kind.get(owner_id)?;
+    let (owner_module, _) = *context.id_to_info.get(owner_id)?;
+    if !modules_match(context.source_module, owner_module) {
+        return None;
+    }
+
+    if is_receiver_dispatch_type_kind(owner_kind) {
+        return Some(owner_id.to_string());
+    }
+    if owner_kind != NodeKind::Extension {
+        return None;
+    }
+
+    let owner_name = *context.id_to_name.get(owner_id)?;
+    unique_same_module_receiver_type_id(
+        owner_name,
+        owner_module,
+        context.name_to_entries,
+        context.id_to_kind,
+    )
+}
+
+/// Resolve `receiver.member` only through an explicit field/property type on
+/// the caller's exact enclosing type. If the receiver is an ordinary static
+/// type name or an untracked local/external symbol, report `NotApplicable` and
+/// let existing static/import resolution handle it. Only an actual direct
+/// field/property without sufficient type evidence is rejected, which avoids
+/// name-only implementation fanout without preempting existing import paths.
+fn resolve_typed_simple_receiver_call(
+    raw_target: &str,
+    source_id: &str,
+    context: &TypedReceiverContext<'_>,
+) -> TypedReceiverCallResolution {
+    let Some((receiver, member)) = simple_receiver_call(raw_target) else {
+        return TypedReceiverCallResolution::NotApplicable;
+    };
+
+    let Some(owner_type_id) = receiver_owner_type_id(source_id, context) else {
+        return TypedReceiverCallResolution::NotApplicable;
+    };
+
+    let receiver_fields: Vec<&NameEntry> = context
+        .name_to_entries
+        .get(receiver)
+        .into_iter()
+        .flatten()
+        .filter(|candidate| modules_match(context.source_module, candidate.module.as_deref()))
+        .filter(|candidate| {
+            context
+                .id_to_kind
+                .get(candidate.id.as_str())
+                .is_some_and(|kind| is_field_or_property_kind(*kind))
+        })
+        .filter(|candidate| {
+            direct_parent_id(&candidate.id, context.child_to_parents)
+                == Some(owner_type_id.as_str())
+        })
+        .collect();
+
+    if receiver_fields.is_empty() {
+        return TypedReceiverCallResolution::NotApplicable;
+    }
+    let Some(receiver_field) = single(&receiver_fields) else {
+        return TypedReceiverCallResolution::Rejected;
+    };
+    let Some(declared_type) = context
+        .id_to_metadata
+        .get(receiver_field.id.as_str())
+        .and_then(|metadata| metadata.get("grapha.declared_type"))
+        .and_then(|declared_type| nominal_declared_type(declared_type))
+    else {
+        return TypedReceiverCallResolution::Rejected;
+    };
+    let Some(declared_type_id) = unique_same_module_receiver_type_id(
+        declared_type,
+        context.source_module,
+        context.name_to_entries,
+        context.id_to_kind,
+    ) else {
+        return TypedReceiverCallResolution::Rejected;
+    };
+
+    let member_candidates: Vec<&NameEntry> = context
+        .name_to_entries
+        .get(member)
+        .into_iter()
+        .flatten()
+        .filter(|candidate| modules_match(context.source_module, candidate.module.as_deref()))
+        .filter(|candidate| {
+            context
+                .id_to_kind
+                .get(candidate.id.as_str())
+                .is_some_and(|kind| is_callable_member_kind(*kind))
+        })
+        .filter(|candidate| {
+            direct_parent_id(&candidate.id, context.child_to_parents)
+                == Some(declared_type_id.as_str())
+        })
+        .collect();
+
+    single(&member_candidates)
+        .map(|candidate| TypedReceiverCallResolution::Resolved(candidate.id.clone()))
+        .unwrap_or(TypedReceiverCallResolution::Rejected)
+}
+
+/// Merge extraction results into a graph while retaining only the graph output.
 pub fn merge(results: Vec<ExtractionResult>) -> Graph {
+    merge_with_report(results).graph
+}
+
+/// Merge extraction results and return graph output with deterministic accounting.
+pub fn merge_with_report(results: Vec<ExtractionResult>) -> MergeOutcome {
     let mut graph = Graph::new();
+    let mut stats = MergeStats {
+        input_edge_count: results.iter().map(|result| result.edges.len()).sum(),
+        ..MergeStats::default()
+    };
 
     let mut file_imports: HashMap<String, HashSet<String>> = HashMap::new();
     for result in &results {
@@ -507,6 +889,11 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
         .iter()
         .map(|node| (node.id.as_str(), node.kind))
         .collect();
+    let id_to_metadata: HashMap<&str, &HashMap<String, String>> = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), &node.metadata))
+        .collect();
 
     let all_edges: Vec<_> = results
         .into_iter()
@@ -592,11 +979,78 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
             }
         }
 
+        // A qualified `super.member` call cannot be attributed without the
+        // superclass type. Import binding above had the first opportunity to
+        // prove a cross-boundary target; if it did not, do not degrade this
+        // semantic receiver into a same-name search across the module.
+        if edge.kind == EdgeKind::Calls && is_unresolved_simple_super_call(&edge.target) {
+            stats.record_dropped_unresolved_edge(None);
+            continue;
+        }
+
         let target_name = target_symbol_name(&edge.target);
-        let Some(candidates) = name_to_entries.get(target_name) else {
+        let candidates = name_to_entries.get(target_name);
+
+        // A receiver-qualified instance call must have an explicit declared
+        // type on a field/property of the caller's enclosing type. Do this
+        // before generic name resolution so `roomSession.leave` cannot fan out
+        // to every unrelated `leave` implementation in the module.
+        if edge.kind == EdgeKind::Calls {
+            let typed_receiver_context = TypedReceiverContext {
+                source_module,
+                name_to_entries: &name_to_entries,
+                child_to_parents: &child_to_parents,
+                id_to_info: &id_to_info,
+                id_to_name: &id_to_name,
+                id_to_kind: &id_to_kind,
+                id_to_metadata: &id_to_metadata,
+            };
+            match resolve_typed_simple_receiver_call(
+                &edge.target,
+                &edge.source,
+                &typed_receiver_context,
+            ) {
+                TypedReceiverCallResolution::Resolved(bound) => {
+                    edge.target = bound;
+                    edge.confidence *= 0.9;
+                    graph.edges.push(edge);
+                    continue;
+                }
+                TypedReceiverCallResolution::Rejected => {
+                    stats.record_dropped_unresolved_edge(
+                        candidates
+                            .is_none()
+                            .then_some(UnresolvedEdgeDropReason::NoCandidate),
+                    );
+                    continue;
+                }
+                TypedReceiverCallResolution::NotApplicable => {}
+            }
+        }
+
+        // The Swift fallback preserves receiver shape, so import and typed-
+        // property binding are its only qualified-call proof paths. Do not
+        // discard that receiver/path semantics and fall back to terminal-name
+        // fanout; ordinary bare calls and the source-file synthetic bare form
+        // remain on the existing owner-local/generic path below.
+        if edge.kind == EdgeKind::Calls
+            && uses_proof_gated_qualified_call_resolution(source_file)
+            && is_unresolved_qualified_call_target(&edge.target, source_file)
+        {
+            stats.record_dropped_unresolved_edge(
+                candidates
+                    .is_none()
+                    .then_some(UnresolvedEdgeDropReason::NoCandidate),
+            );
+            continue;
+        }
+
+        let Some(candidates) = candidates else {
+            stats.record_dropped_unresolved_edge(Some(UnresolvedEdgeDropReason::NoCandidate));
             continue;
         };
         if candidates.is_empty() {
+            stats.record_dropped_unresolved_edge(Some(UnresolvedEdgeDropReason::NoCandidate));
             continue;
         }
 
@@ -607,6 +1061,29 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
             .unwrap_or_default();
         let owned_hint = target_prefix_hint(&edge.target);
         let prefix_hint = edge.operation.as_deref().or(owned_hint.as_deref());
+
+        // A truly unqualified call from a callable member has a stronger
+        // lexical signal than same-name candidates elsewhere in the module.
+        // Resolve it only when one same-module function/method shares the
+        // caller's *exact* direct `Contains` parent id. Qualified targets such
+        // as `super.createGame`, `receiver.createGame` and `Type::createGame`
+        // deliberately skip this path.
+        if edge.kind == EdgeKind::Calls
+            && let Some(bound) = resolve_bare_owner_local_call(
+                &edge.target,
+                &edge.source,
+                source_file,
+                source_module,
+                candidates,
+                &child_to_parents,
+                &id_to_kind,
+            )
+        {
+            edge.target = bound;
+            edge.confidence *= 0.9;
+            graph.edges.push(edge);
+            continue;
+        }
 
         if candidates.len() == 1 {
             let candidate = &candidates[0];
@@ -622,6 +1099,7 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
                     )
                     && should_enforce_hint(&edge.target, hint)
                 {
+                    stats.record_dropped_unresolved_edge(None);
                     continue;
                 }
                 edge.target = candidate.id.clone();
@@ -640,6 +1118,8 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
                     edge.target = candidate.id.clone();
                     edge.confidence *= 0.7;
                     graph.edges.push(edge);
+                } else {
+                    stats.record_dropped_unresolved_edge(None);
                 }
             }
             continue;
@@ -691,6 +1171,7 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
                 // No siblings found with same USR prefix — this property
                 // is not a member of the source's type. Drop the read edge
                 // rather than resolving to unrelated types.
+                stats.record_dropped_unresolved_edge(None);
                 continue;
             }
 
@@ -727,7 +1208,10 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
             candidate_file_stems: &candidate_file_stems,
         };
         let resolved = resolve_candidates(candidates, &resolve_context);
-        for (candidate_id, factor) in resolved {
+        if resolved.candidates.is_empty() {
+            stats.record_dropped_unresolved_edge(resolved.drop_reason);
+        }
+        for (candidate_id, factor) in resolved.candidates {
             let mut resolved_edge = edge.clone();
             resolved_edge.target = candidate_id;
             resolved_edge.confidence *= factor;
@@ -735,7 +1219,7 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
         }
     }
 
-    graph
+    MergeOutcome { graph, stats }
 }
 
 /// Extract the type prefix from a USR string.
@@ -802,7 +1286,7 @@ fn candidate_matches_hint(
 fn resolve_candidates(
     candidates: &[NameEntry],
     context: &ResolveContext<'_>,
-) -> Vec<(String, f64)> {
+) -> CandidateResolution {
     let same_module: Vec<&NameEntry> = candidates
         .iter()
         .filter(|candidate| modules_match(context.source_module, candidate.module.as_deref()))
@@ -818,9 +1302,9 @@ fn resolve_candidates(
             )
             && should_enforce_hint(context.raw_target, hint)
         {
-            return Vec::new();
+            return CandidateResolution::dropped(None);
         }
-        return vec![(same_module[0].id.clone(), 0.9)];
+        return CandidateResolution::resolved(vec![(same_module[0].id.clone(), 0.9)]);
     }
 
     if same_module.len() > 1 {
@@ -838,10 +1322,10 @@ fn resolve_candidates(
                 })
                 .collect();
             if narrowed.len() == 1 {
-                return vec![(narrowed[0].id.clone(), 0.85)];
+                return CandidateResolution::resolved(vec![(narrowed[0].id.clone(), 0.85)]);
             }
             if narrowed.is_empty() && should_enforce_hint(context.raw_target, hint) {
-                return Vec::new();
+                return CandidateResolution::dropped(None);
             }
         }
 
@@ -852,12 +1336,16 @@ fn resolve_candidates(
         // in the same file isn't penalized.
         let unique_files: HashSet<&str> = same_module.iter().map(|c| c.file.as_str()).collect();
         if unique_files.len() > 3 {
-            return Vec::new();
+            return CandidateResolution::dropped(Some(
+                UnresolvedEdgeDropReason::AmbiguousMoreThanThreeFiles,
+            ));
         }
-        return same_module
-            .iter()
-            .map(|candidate| (candidate.id.clone(), 0.4))
-            .collect();
+        return CandidateResolution::resolved(
+            same_module
+                .iter()
+                .map(|candidate| (candidate.id.clone(), 0.4))
+                .collect(),
+        );
     }
 
     if let Some(imports) = context.source_imports {
@@ -871,21 +1359,25 @@ fn resolve_candidates(
             })
             .collect();
         if imported.len() == 1 {
-            return vec![(imported[0].id.clone(), 0.8)];
+            return CandidateResolution::resolved(vec![(imported[0].id.clone(), 0.8)]);
         }
         if imported.len() > 1 {
             let unique_files: HashSet<&str> = imported.iter().map(|c| c.file.as_str()).collect();
             if unique_files.len() > 3 {
-                return Vec::new();
+                return CandidateResolution::dropped(Some(
+                    UnresolvedEdgeDropReason::AmbiguousMoreThanThreeFiles,
+                ));
             }
-            return imported
-                .iter()
-                .map(|candidate| (candidate.id.clone(), 0.3))
-                .collect();
+            return CandidateResolution::resolved(
+                imported
+                    .iter()
+                    .map(|candidate| (candidate.id.clone(), 0.3))
+                    .collect(),
+            );
         }
     }
 
-    Vec::new()
+    CandidateResolution::dropped(None)
 }
 
 fn modules_match(left: Option<&str>, right: Option<&str>) -> bool {
@@ -965,6 +1457,63 @@ mod tests {
     }
 
     #[test]
+    fn merge_with_report_counts_resolved_and_unresolved_input_edges() {
+        let mut caller = make_node("a::main", "main", NodeKind::Function);
+        caller.module = Some("a".to_string());
+        let mut helper = make_node("a::helper", "helper", NodeKind::Function);
+        helper.module = Some("a".to_string());
+        let result = ExtractionResult {
+            nodes: vec![caller, helper],
+            edges: vec![
+                Edge {
+                    source: "a::main".to_string(),
+                    target: "helper".to_string(),
+                    kind: EdgeKind::Calls,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                    provenance: Vec::new(),
+                    repo: None,
+                },
+                Edge {
+                    source: "a::main".to_string(),
+                    target: "missing".to_string(),
+                    kind: EdgeKind::Calls,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                    provenance: Vec::new(),
+                    repo: None,
+                },
+            ],
+            imports: vec![],
+        };
+
+        let expected_graph = merge(vec![result.clone()]);
+        let outcome = merge_with_report(vec![result]);
+
+        assert_eq!(outcome.graph, expected_graph);
+        assert_eq!(outcome.graph.edges.len(), 1);
+        assert_eq!(outcome.stats.input_edge_count, 2);
+        assert_eq!(outcome.stats.dropped_unresolved_edge_count, 1);
+        assert_eq!(
+            outcome
+                .stats
+                .dropped_unresolved_edge_count_by_reason
+                .get(&UnresolvedEdgeDropReason::NoCandidate),
+            Some(&1)
+        );
+        assert_eq!(
+            outcome.stats.dropped_unresolved_edge_count_by_reason.len(),
+            1
+        );
+    }
+
+    #[test]
     fn keeps_uses_edges_even_if_target_unresolved() {
         let result = ExtractionResult {
             nodes: vec![],
@@ -999,7 +1548,7 @@ mod tests {
                 nodes: vec![caller],
                 edges: vec![Edge {
                     source: "mod_a::main".to_string(),
-                    target: "unknown::helper".to_string(),
+                    target: "helper".to_string(),
                     kind: EdgeKind::Calls,
                     confidence: 1.0,
                     direction: None,
@@ -1141,20 +1690,20 @@ mod tests {
     }
 
     #[test]
-    fn module_hint_resolves_call_by_file_stem() {
+    fn unimported_qualified_call_does_not_resolve_by_file_stem() {
         let caller = Node {
-            file: PathBuf::from("lib.rs"),
-            ..make_node("lib.rs::run", "run", NodeKind::Function)
+            file: PathBuf::from("View.swift"),
+            ..make_node("View.swift::run", "run", NodeKind::Function)
         };
         let callee = Node {
-            file: PathBuf::from("utils.rs"),
-            ..make_node("utils.rs::helper", "helper", NodeKind::Function)
+            file: PathBuf::from("Helpers.swift"),
+            ..make_node("Helpers.swift::helper", "helper", NodeKind::Function)
         };
 
         let graph = merge(vec![ExtractionResult {
             nodes: vec![caller, callee],
             edges: vec![Edge {
-                source: "lib.rs::run".to_string(),
+                source: "View.swift::run".to_string(),
                 target: "utils::helper".to_string(),
                 kind: EdgeKind::Calls,
                 confidence: 1.0,
@@ -1168,8 +1717,7 @@ mod tests {
             imports: vec![],
         }]);
 
-        assert_eq!(graph.edges.len(), 1);
-        assert_eq!(graph.edges[0].target, "utils.rs::helper");
+        assert!(graph.edges.is_empty());
     }
 
     #[test]
@@ -1265,6 +1813,45 @@ mod tests {
             symbols: symbols.iter().map(|s| s.to_string()).collect(),
             kind: crate::resolve::ImportKind::Named,
         }
+    }
+
+    #[test]
+    fn merge_with_report_buckets_ambiguity_across_more_than_three_files() {
+        let caller = node_in(
+            "src/caller.rs::caller",
+            "caller",
+            NodeKind::Function,
+            "module",
+            "src/caller.rs",
+        );
+        let candidates: Vec<_> = ["one", "two", "three", "four"]
+            .into_iter()
+            .map(|file| {
+                node_in(
+                    &format!("src/{file}.rs::shared"),
+                    "shared",
+                    NodeKind::Function,
+                    "module",
+                    &format!("src/{file}.rs"),
+                )
+            })
+            .collect();
+        let outcome = merge_with_report(vec![ExtractionResult {
+            nodes: std::iter::once(caller).chain(candidates).collect(),
+            edges: vec![edge_of("src/caller.rs::caller", "shared", EdgeKind::Calls)],
+            imports: vec![],
+        }]);
+
+        assert!(outcome.graph.edges.is_empty());
+        assert_eq!(outcome.stats.input_edge_count, 1);
+        assert_eq!(outcome.stats.dropped_unresolved_edge_count, 1);
+        assert_eq!(
+            outcome
+                .stats
+                .dropped_unresolved_edge_count_by_reason
+                .get(&UnresolvedEdgeDropReason::AmbiguousMoreThanThreeFiles),
+            Some(&1)
+        );
     }
 
     #[test]
@@ -1605,5 +2192,651 @@ mod tests {
             type_ref.target,
             "crates/nous-core/src/confidence.rs::Confidence"
         );
+    }
+
+    #[test]
+    fn bare_call_prefers_unique_same_owner_callable() {
+        // Mirrors the Android `initViews { createGame() }` shape: a bare call
+        // must choose the only callable directly contained by the same type,
+        // not every same-named declaration in the module.
+        let dialog = node_in(
+            "carrom::CreateDialog",
+            "CreateDialog",
+            NodeKind::Class,
+            "carrom",
+            "CreateDialog.kt",
+        );
+        let fragment = node_in(
+            "carrom::CreateFragment",
+            "CreateFragment",
+            NodeKind::Class,
+            "carrom",
+            "CreateFragment.kt",
+        );
+        let service = node_in(
+            "carrom::CreateService",
+            "CreateService",
+            NodeKind::Class,
+            "carrom",
+            "CreateService.kt",
+        );
+        let caller = node_in(
+            "carrom::CreateDialog::initViews",
+            "initViews",
+            NodeKind::Function,
+            "carrom",
+            "CreateDialog.kt",
+        );
+        let local_create = node_in(
+            "carrom::CreateDialog::createGame",
+            "createGame",
+            NodeKind::Function,
+            "carrom",
+            "CreateDialog.kt",
+        );
+        let fragment_create = node_in(
+            "carrom::CreateFragment::createGame",
+            "createGame",
+            NodeKind::Function,
+            "carrom",
+            "CreateFragment.kt",
+        );
+        let service_create = node_in(
+            "carrom::CreateService::createGame",
+            "createGame",
+            NodeKind::Function,
+            "carrom",
+            "CreateService.kt",
+        );
+
+        let graph = merge(vec![ExtractionResult {
+            nodes: vec![
+                dialog,
+                fragment,
+                service,
+                caller,
+                local_create,
+                fragment_create,
+                service_create,
+            ],
+            edges: vec![
+                edge_of(
+                    "carrom::CreateDialog",
+                    "carrom::CreateDialog::initViews",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "carrom::CreateDialog",
+                    "carrom::CreateDialog::createGame",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "carrom::CreateFragment",
+                    "carrom::CreateFragment::createGame",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "carrom::CreateService",
+                    "carrom::CreateService::createGame",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "carrom::CreateDialog::initViews",
+                    "createGame",
+                    EdgeKind::Calls,
+                ),
+            ],
+            imports: vec![],
+        }]);
+
+        let calls: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == EdgeKind::Calls && edge.source == "carrom::CreateDialog::initViews"
+            })
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].target, "carrom::CreateDialog::createGame");
+        assert!((calls[0].confidence - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn swift_file_scoped_bare_call_prefers_same_extension_callable() {
+        // The Swift tree-sitter fallback represents a lexical `joinRoom()` as
+        // `WebGameRoomController.swift::joinRoom`. It is owner-local only
+        // because that prefix is exactly the caller's source file; the
+        // extension's direct containment then distinguishes it from another
+        // same-named method in the module.
+        let room_controller_extension = node_in(
+            "webgame::ext_WebGameRoomController",
+            "WebGameRoomController",
+            NodeKind::Extension,
+            "webgame",
+            "WebGameRoomController.swift",
+        );
+        let other_controller = node_in(
+            "webgame::OtherRoomController",
+            "OtherRoomController",
+            NodeKind::Class,
+            "webgame",
+            "OtherRoomController.swift",
+        );
+        let caller = node_in(
+            "webgame::ext_WebGameRoomController::resume",
+            "resume",
+            NodeKind::Function,
+            "webgame",
+            "WebGameRoomController.swift",
+        );
+        let local_join = node_in(
+            "webgame::ext_WebGameRoomController::joinRoom",
+            "joinRoom",
+            NodeKind::Function,
+            "webgame",
+            "WebGameRoomController.swift",
+        );
+        let foreign_join = node_in(
+            "webgame::OtherRoomController::joinRoom",
+            "joinRoom",
+            NodeKind::Function,
+            "webgame",
+            "OtherRoomController.swift",
+        );
+
+        let graph = merge(vec![ExtractionResult {
+            nodes: vec![
+                room_controller_extension,
+                other_controller,
+                caller,
+                local_join,
+                foreign_join,
+            ],
+            edges: vec![
+                edge_of(
+                    "webgame::ext_WebGameRoomController",
+                    "webgame::ext_WebGameRoomController::resume",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::ext_WebGameRoomController",
+                    "webgame::ext_WebGameRoomController::joinRoom",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::OtherRoomController",
+                    "webgame::OtherRoomController::joinRoom",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::ext_WebGameRoomController::resume",
+                    "WebGameRoomController.swift::joinRoom",
+                    EdgeKind::Calls,
+                ),
+            ],
+            imports: vec![],
+        }]);
+
+        let calls: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == EdgeKind::Calls
+                    && edge.source == "webgame::ext_WebGameRoomController::resume"
+            })
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].target,
+            "webgame::ext_WebGameRoomController::joinRoom"
+        );
+        assert!((calls[0].confidence - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn qualified_super_call_is_not_treated_as_owner_local() {
+        let dialog = node_in(
+            "carrom::CreateDialog",
+            "CreateDialog",
+            NodeKind::Class,
+            "carrom",
+            "CreateDialog.kt",
+        );
+        let fragment = node_in(
+            "carrom::CreateFragment",
+            "CreateFragment",
+            NodeKind::Class,
+            "carrom",
+            "CreateFragment.kt",
+        );
+        let caller = node_in(
+            "carrom::CreateDialog::initViews",
+            "initViews",
+            NodeKind::Function,
+            "carrom",
+            "CreateDialog.kt",
+        );
+        let local_create = node_in(
+            "carrom::CreateDialog::createGame",
+            "createGame",
+            NodeKind::Function,
+            "carrom",
+            "CreateDialog.kt",
+        );
+        let foreign_create = node_in(
+            "carrom::CreateFragment::createGame",
+            "createGame",
+            NodeKind::Function,
+            "carrom",
+            "CreateFragment.kt",
+        );
+
+        let graph = merge(vec![ExtractionResult {
+            nodes: vec![dialog, fragment, caller, local_create, foreign_create],
+            edges: vec![
+                edge_of(
+                    "carrom::CreateDialog",
+                    "carrom::CreateDialog::initViews",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "carrom::CreateDialog",
+                    "carrom::CreateDialog::createGame",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "carrom::CreateFragment",
+                    "carrom::CreateFragment::createGame",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "carrom::CreateDialog::initViews",
+                    "super.createGame",
+                    EdgeKind::Calls,
+                ),
+            ],
+            imports: vec![],
+        }]);
+
+        let calls: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == EdgeKind::Calls && edge.source == "carrom::CreateDialog::initViews"
+            })
+            .collect();
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn unknown_qualified_receiver_call_does_not_fan_out_by_terminal_name() {
+        let controller = node_in(
+            "webgame::Controller",
+            "Controller",
+            NodeKind::Class,
+            "webgame",
+            "Controller.swift",
+        );
+        let caller = node_in(
+            "webgame::Controller::exit",
+            "exit",
+            NodeKind::Function,
+            "webgame",
+            "Controller.swift",
+        );
+        let first_session = node_in(
+            "webgame::FirstSession",
+            "FirstSession",
+            NodeKind::Class,
+            "webgame",
+            "FirstSession.swift",
+        );
+        let first_leave = node_in(
+            "webgame::FirstSession::leave",
+            "leave",
+            NodeKind::Function,
+            "webgame",
+            "FirstSession.swift",
+        );
+        let second_session = node_in(
+            "webgame::SecondSession",
+            "SecondSession",
+            NodeKind::Class,
+            "webgame",
+            "SecondSession.swift",
+        );
+        let second_leave = node_in(
+            "webgame::SecondSession::leave",
+            "leave",
+            NodeKind::Method,
+            "webgame",
+            "SecondSession.swift",
+        );
+
+        let graph = merge(vec![ExtractionResult {
+            nodes: vec![
+                controller,
+                caller,
+                first_session,
+                first_leave,
+                second_session,
+                second_leave,
+            ],
+            edges: vec![
+                edge_of(
+                    "webgame::Controller",
+                    "webgame::Controller::exit",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::FirstSession",
+                    "webgame::FirstSession::leave",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::SecondSession",
+                    "webgame::SecondSession::leave",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::Controller::exit",
+                    "unknownReceiver.leave",
+                    EdgeKind::Calls,
+                ),
+            ],
+            imports: vec![],
+        }]);
+
+        assert!(graph.edges.iter().all(|edge| edge.kind != EdgeKind::Calls));
+    }
+
+    #[test]
+    fn typed_receiver_call_binds_protocol_member_through_unique_base_type() {
+        // Swift stores `roomSession` on the class but may place the caller in
+        // `extension WebGameRoomController`. The bridge is permitted only
+        // because the extension name maps to one same-module base class.
+        let controller = node_in(
+            "webgame::WebGameRoomController",
+            "WebGameRoomController",
+            NodeKind::Class,
+            "webgame",
+            "WebGameRoomController.swift",
+        );
+        let controller_extension = node_in(
+            "webgame::ext_WebGameRoomController",
+            "WebGameRoomController",
+            NodeKind::Extension,
+            "webgame",
+            "WebGameRoomController+Room.swift",
+        );
+        let caller = node_in(
+            "webgame::ext_WebGameRoomController::leaveRoomIfNeed",
+            "leaveRoomIfNeed",
+            NodeKind::Function,
+            "webgame",
+            "WebGameRoomController+Room.swift",
+        );
+        let mut room_session = node_in(
+            "webgame::WebGameRoomController::roomSession",
+            "roomSession",
+            NodeKind::Property,
+            "webgame",
+            "WebGameRoomController.swift",
+        );
+        room_session.metadata.insert(
+            "grapha.declared_type".to_string(),
+            "GameRoomSessionRepresentable".to_string(),
+        );
+        let session_protocol = node_in(
+            "webgame::GameRoomSessionRepresentable",
+            "GameRoomSessionRepresentable",
+            NodeKind::Protocol,
+            "webgame",
+            "GameRoomSession.swift",
+        );
+        let protocol_leave = node_in(
+            "webgame::GameRoomSessionRepresentable::leaveCurrentRoomIfJoined",
+            "leaveCurrentRoomIfJoined",
+            NodeKind::Function,
+            "webgame",
+            "GameRoomSession.swift",
+        );
+        let default_session = node_in(
+            "webgame::DefaultGameRoomSession",
+            "DefaultGameRoomSession",
+            NodeKind::Class,
+            "webgame",
+            "DefaultGameRoomSession.swift",
+        );
+        let implementation_leave = node_in(
+            "webgame::DefaultGameRoomSession::leaveCurrentRoomIfJoined",
+            "leaveCurrentRoomIfJoined",
+            NodeKind::Function,
+            "webgame",
+            "DefaultGameRoomSession.swift",
+        );
+
+        let graph = merge(vec![ExtractionResult {
+            nodes: vec![
+                controller,
+                controller_extension,
+                caller,
+                room_session,
+                session_protocol,
+                protocol_leave,
+                default_session,
+                implementation_leave,
+            ],
+            edges: vec![
+                edge_of(
+                    "webgame::ext_WebGameRoomController",
+                    "webgame::ext_WebGameRoomController::leaveRoomIfNeed",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::WebGameRoomController",
+                    "webgame::WebGameRoomController::roomSession",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::GameRoomSessionRepresentable",
+                    "webgame::GameRoomSessionRepresentable::leaveCurrentRoomIfJoined",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::DefaultGameRoomSession",
+                    "webgame::DefaultGameRoomSession::leaveCurrentRoomIfJoined",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::ext_WebGameRoomController::leaveRoomIfNeed",
+                    "roomSession.leaveCurrentRoomIfJoined",
+                    EdgeKind::Calls,
+                ),
+            ],
+            imports: vec![],
+        }]);
+
+        let calls: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == EdgeKind::Calls
+                    && edge.source == "webgame::ext_WebGameRoomController::leaveRoomIfNeed"
+            })
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].target,
+            "webgame::GameRoomSessionRepresentable::leaveCurrentRoomIfJoined"
+        );
+        assert!((calls[0].confidence - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn untyped_receiver_call_does_not_fall_back_to_owner_name_guessing() {
+        let controller = node_in(
+            "webgame::Controller",
+            "Controller",
+            NodeKind::Class,
+            "webgame",
+            "Controller.swift",
+        );
+        let caller = node_in(
+            "webgame::Controller::exit",
+            "exit",
+            NodeKind::Function,
+            "webgame",
+            "Controller.swift",
+        );
+        let room_session = node_in(
+            "webgame::Controller::roomSession",
+            "roomSession",
+            NodeKind::Property,
+            "webgame",
+            "Controller.swift",
+        );
+        // The type name intentionally matches the receiver case-insensitively.
+        // Before the typed-receiver guard, generic hint resolution would bind
+        // this `roomSession.leave` call despite the property having no type.
+        let session_type = node_in(
+            "webgame::RoomSession",
+            "RoomSession",
+            NodeKind::Protocol,
+            "webgame",
+            "RoomSession.swift",
+        );
+        let session_leave = node_in(
+            "webgame::RoomSession::leave",
+            "leave",
+            NodeKind::Function,
+            "webgame",
+            "RoomSession.swift",
+        );
+
+        let graph = merge(vec![ExtractionResult {
+            nodes: vec![
+                controller,
+                caller,
+                room_session,
+                session_type,
+                session_leave,
+            ],
+            edges: vec![
+                edge_of(
+                    "webgame::Controller",
+                    "webgame::Controller::exit",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::Controller",
+                    "webgame::Controller::roomSession",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::RoomSession",
+                    "webgame::RoomSession::leave",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::Controller::exit",
+                    "roomSession.leave",
+                    EdgeKind::Calls,
+                ),
+            ],
+            imports: vec![],
+        }]);
+
+        assert!(graph.edges.iter().all(|edge| edge.kind != EdgeKind::Calls));
+    }
+
+    #[test]
+    fn typed_receiver_call_drops_ambiguous_declared_members() {
+        let controller = node_in(
+            "webgame::Controller",
+            "Controller",
+            NodeKind::Class,
+            "webgame",
+            "Controller.swift",
+        );
+        let caller = node_in(
+            "webgame::Controller::exit",
+            "exit",
+            NodeKind::Function,
+            "webgame",
+            "Controller.swift",
+        );
+        let mut room_session = node_in(
+            "webgame::Controller::roomSession",
+            "roomSession",
+            NodeKind::Property,
+            "webgame",
+            "Controller.swift",
+        );
+        room_session
+            .metadata
+            .insert("grapha.declared_type".to_string(), "Session".to_string());
+        let session = node_in(
+            "webgame::Session",
+            "Session",
+            NodeKind::Protocol,
+            "webgame",
+            "Session.swift",
+        );
+        let first_leave = node_in(
+            "webgame::Session::leave:first",
+            "leave",
+            NodeKind::Function,
+            "webgame",
+            "Session.swift",
+        );
+        let second_leave = node_in(
+            "webgame::Session::leave:second",
+            "leave",
+            NodeKind::Method,
+            "webgame",
+            "Session.swift",
+        );
+
+        let graph = merge(vec![ExtractionResult {
+            nodes: vec![
+                controller,
+                caller,
+                room_session,
+                session,
+                first_leave,
+                second_leave,
+            ],
+            edges: vec![
+                edge_of(
+                    "webgame::Controller",
+                    "webgame::Controller::exit",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::Controller",
+                    "webgame::Controller::roomSession",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::Session",
+                    "webgame::Session::leave:first",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::Session",
+                    "webgame::Session::leave:second",
+                    EdgeKind::Contains,
+                ),
+                edge_of(
+                    "webgame::Controller::exit",
+                    "roomSession.leave",
+                    EdgeKind::Calls,
+                ),
+            ],
+            imports: vec![],
+        }]);
+
+        assert!(graph.edges.iter().all(|edge| edge.kind != EdgeKind::Calls));
     }
 }

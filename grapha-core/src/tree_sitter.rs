@@ -123,6 +123,7 @@ impl ExtractionState<'_> {
             && self.inside_container()
             && self.extract_leaf(node, NodeKind::Field)
         {
+            self.walk_initializers(node, false);
             return;
         }
 
@@ -135,6 +136,7 @@ impl ExtractionState<'_> {
         }
 
         if self.config.variable_types.contains(&kind) && self.extract_variable(node) {
+            self.walk_initializers(node, true);
             return;
         }
 
@@ -166,6 +168,40 @@ impl ExtractionState<'_> {
         }
     }
 
+    fn walk_initializers(&mut self, declaration: TsNode, skip_function_values: bool) {
+        let mut initializers = Vec::new();
+        if let Some(value) = initializer_value(declaration) {
+            initializers.push(value);
+        } else {
+            let mut cursor = declaration.walk();
+            for child in declaration.named_children(&mut cursor) {
+                if is_variable_declarator_kind(child.kind())
+                    && let Some(value) = initializer_value(child)
+                {
+                    initializers.push(value);
+                }
+            }
+        }
+
+        for initializer in initializers {
+            if is_function_value(initializer) {
+                if !skip_function_values {
+                    self.walk_function_value_body(initializer);
+                }
+            } else {
+                self.walk(initializer);
+            }
+        }
+    }
+
+    fn walk_function_value_body(&mut self, value: TsNode) {
+        if let Some(body) = value.child_by_field_name(self.config.body_field) {
+            self.walk(body);
+        } else {
+            self.walk_children(value);
+        }
+    }
+
     fn inside_container(&self) -> bool {
         self.scopes.iter().rev().any(|scope| {
             matches!(
@@ -191,6 +227,10 @@ impl ExtractionState<'_> {
             .rev()
             .find(|scope| matches!(scope.kind, NodeKind::Function | NodeKind::Property))
             .map(|scope| scope.id.as_str())
+    }
+
+    fn inside_callable_scope(&self) -> bool {
+        self.current_callable_scope_id().is_some()
     }
 
     fn extract_container(&mut self, node: TsNode, mut node_kind: NodeKind) -> bool {
@@ -305,8 +345,15 @@ impl ExtractionState<'_> {
                 id,
                 kind: NodeKind::Function,
             });
-            self.walk_body_or_children(value);
+            self.walk_function_value_body(value);
             self.scopes.pop();
+            return true;
+        }
+
+        if self.inside_callable_scope() {
+            // Report ordinary locals through their enclosing callable instead
+            // of materializing short-lived symbols. Returning handled keeps
+            // `walk_initializers` responsible for their call edges.
             return true;
         }
 
@@ -324,9 +371,10 @@ impl ExtractionState<'_> {
     }
 
     fn extract_call(&mut self, node: TsNode) {
-        let Some(source_id) = self.current_callable_scope_id().map(ToString::to_string) else {
-            return;
-        };
+        let source_id = self
+            .current_callable_scope_id()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.file_node_id.clone());
         let Some(callee) = callee_name(node, self.source) else {
             return;
         };
@@ -352,12 +400,19 @@ impl ExtractionState<'_> {
         let Some(raw) = text(node, self.source) else {
             return false;
         };
-        let imports = parse_imports(self.config.id, &raw);
+        let imports = parse_imports(self.config.id, node, self.source, &raw);
         if imports.is_empty() {
             return false;
         }
         for import in imports {
-            self.push_import_node(node, &import.path, &raw);
+            // Kotlin's grammar exposes every declaration as an individual
+            // `import` node. Keep those imports as resolution facts, but do
+            // not materialize tens of thousands of graph symbols in Android
+            // projects for declarations that do not represent code symbols.
+            // Other grammars retain their established import-node behavior.
+            if self.config.id != "kotlin" {
+                self.push_import_node(node, &import.path, &raw);
+            }
             self.result.imports.push(import);
         }
         true
@@ -444,6 +499,14 @@ impl ExtractionState<'_> {
         }
         if is_exported(node, self.source) {
             metadata.insert("exported".to_string(), "true".to_string());
+        }
+        if self.config.id == "kotlin"
+            && kind == NodeKind::Field
+            && node.kind() == "property_declaration"
+            && let Some(declared_type) =
+                kotlin_field_declared_type(node, self.source, &self.result.imports)
+        {
+            metadata.insert("grapha.declared_type".to_string(), declared_type);
         }
 
         self.result.nodes.push(Node {
@@ -1189,6 +1252,179 @@ fn is_anonymous_name(name: &str) -> bool {
     matches!(name, "<anonymous>" | "_" | "")
 }
 
+fn initializer_value(node: TsNode) -> Option<TsNode> {
+    node.child_by_field_name("value")
+        .or_else(|| node.child_by_field_name("right"))
+}
+
+fn is_function_value(node: TsNode) -> bool {
+    matches!(node.kind(), "arrow_function" | "function_expression")
+}
+
+fn is_variable_declarator_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "variable_declarator"
+            | "init_declarator"
+            | "const_declaration"
+            | "short_var_declaration"
+            | "assignment"
+    )
+}
+
+/// Prove a Kotlin field's declared type without inferring from arbitrary
+/// delegates. An explicit annotation always wins: an unsupported explicit
+/// annotation deliberately blocks the narrower AndroidX-delegate fallback.
+fn kotlin_field_declared_type(
+    property: TsNode,
+    source: &[u8],
+    imports: &[Import],
+) -> Option<String> {
+    match kotlin_explicit_property_type(property, source) {
+        KotlinExplicitPropertyType::Supported(name) => return Some(name),
+        KotlinExplicitPropertyType::Unsupported => return None,
+        KotlinExplicitPropertyType::Absent => {}
+    }
+
+    kotlin_androidx_view_model_delegate_type(property, source, imports)
+}
+
+enum KotlinExplicitPropertyType {
+    Absent,
+    Supported(String),
+    Unsupported,
+}
+
+/// A Kotlin property's variable declaration contains its annotation directly.
+/// Only a single unqualified `user_type` identifier is a stable nominal type;
+/// the nullable spelling wraps that same shape in `nullable_type`.
+fn kotlin_explicit_property_type(property: TsNode, source: &[u8]) -> KotlinExplicitPropertyType {
+    let Some(variable_declaration) = direct_named_children(property)
+        .into_iter()
+        .find(|child| child.kind() == "variable_declaration")
+    else {
+        return KotlinExplicitPropertyType::Absent;
+    };
+
+    let type_children = direct_named_children(variable_declaration)
+        .into_iter()
+        .filter(|child| !matches!(child.kind(), "identifier" | "annotation"))
+        .collect::<Vec<_>>();
+    let [type_node] = type_children.as_slice() else {
+        return if type_children.is_empty() {
+            KotlinExplicitPropertyType::Absent
+        } else {
+            KotlinExplicitPropertyType::Unsupported
+        };
+    };
+
+    if let Some(name) = kotlin_simple_nominal_type(*type_node, source) {
+        KotlinExplicitPropertyType::Supported(name)
+    } else {
+        KotlinExplicitPropertyType::Unsupported
+    }
+}
+
+fn kotlin_androidx_view_model_delegate_type(
+    property: TsNode,
+    source: &[u8],
+    imports: &[Import],
+) -> Option<String> {
+    let delegates = direct_named_children(property)
+        .into_iter()
+        .filter(|child| child.kind() == "property_delegate")
+        .collect::<Vec<_>>();
+    let [delegate] = delegates.as_slice() else {
+        return None;
+    };
+
+    let delegate_children = direct_named_children(*delegate);
+    let [call] = delegate_children.as_slice() else {
+        return None;
+    };
+    if call.kind() != "call_expression" {
+        return None;
+    }
+
+    let call_children = direct_named_children(*call);
+    let callee = call_children.first().copied()?;
+    if callee.kind() != "identifier" {
+        return None;
+    }
+    let callee = clean_identifier(text(callee, source)?);
+    let required_import = match callee.as_str() {
+        "viewModels" => "androidx.fragment.app.viewModels",
+        "activityViewModels" => "androidx.fragment.app.activityViewModels",
+        _ => return None,
+    };
+    if !imports.iter().any(|import| {
+        import.kind == ImportKind::Module
+            && import.symbols.is_empty()
+            && import.path == required_import
+    }) {
+        return None;
+    }
+
+    let type_arguments = call_children
+        .into_iter()
+        .filter(|child| child.kind() == "type_arguments")
+        .collect::<Vec<_>>();
+    let [type_arguments] = type_arguments.as_slice() else {
+        return None;
+    };
+    let projections = direct_named_children(*type_arguments);
+    let [projection] = projections.as_slice() else {
+        return None;
+    };
+    if projection.kind() != "type_projection" {
+        return None;
+    }
+    let projected_types = direct_named_children(*projection);
+    let [projected_type] = projected_types.as_slice() else {
+        return None;
+    };
+    if projected_type.kind() != "user_type" {
+        return None;
+    }
+
+    kotlin_simple_user_type(*projected_type, source)
+}
+
+fn kotlin_simple_nominal_type(node: TsNode, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "user_type" => kotlin_simple_user_type(node, source),
+        "nullable_type" => {
+            let children = direct_named_children(node);
+            let [user_type] = children.as_slice() else {
+                return None;
+            };
+            kotlin_simple_user_type(*user_type, source)
+        }
+        _ => None,
+    }
+}
+
+fn kotlin_simple_user_type(node: TsNode, source: &[u8]) -> Option<String> {
+    if node.kind() != "user_type" {
+        return None;
+    }
+    let children = direct_named_children(node);
+    let [identifier] = children.as_slice() else {
+        return None;
+    };
+    if identifier.kind() != "identifier" {
+        return None;
+    }
+    text(*identifier, source)
+        .map(clean_identifier)
+        .filter(|name| !name.is_empty())
+}
+
+fn direct_named_children(node: TsNode) -> Vec<TsNode> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).collect()
+}
+
 fn descendants_with_kinds<'tree>(node: TsNode<'tree>, kinds: &[&str]) -> Vec<TsNode<'tree>> {
     let mut out = Vec::new();
     let mut cursor = node.walk();
@@ -1233,6 +1469,10 @@ fn qualified_method_invocation_name(node: TsNode, source: &[u8]) -> Option<Strin
 }
 
 fn qualified_or_terminal_name(node: TsNode, source: &[u8]) -> Option<String> {
+    if let Some(normalized) = normalized_navigation_name(node, source) {
+        return Some(normalized);
+    }
+
     if matches!(
         node.kind(),
         "member_expression"
@@ -1250,6 +1490,48 @@ fn qualified_or_terminal_name(node: TsNode, source: &[u8]) -> Option<String> {
     terminal_name(node, source)
 }
 
+/// Kotlin represents both `receiver.method()` and `Constructor(...).method()`
+/// as a fieldless `navigation_expression`. Its raw text contains argument
+/// lists for constructor chains, which is not a stable graph target. Build the
+/// target from the receiver and final member instead: `Constructor.method`.
+///
+/// This is intentionally lexical only. Keeping the receiver qualifier avoids
+/// turning a polymorphic or inherited call into an ambiguous bare method name.
+fn normalized_navigation_name(node: TsNode, source: &[u8]) -> Option<String> {
+    if node.kind() != "navigation_expression" {
+        return None;
+    }
+
+    let mut cursor = node.walk();
+    let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+    let [receiver, member] = children.as_slice() else {
+        return None;
+    };
+    let member = terminal_name(*member, source)?;
+    let receiver = navigation_receiver_name(*receiver, source)?;
+
+    if receiver.is_empty() || member.is_empty() {
+        return None;
+    }
+    Some(format!("{receiver}.{member}"))
+}
+
+fn navigation_receiver_name(node: TsNode, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        // These grammar nodes have no identifier child. Preserve their source
+        // spelling so `super.method` and `this.method` remain qualified.
+        "super_expression" | "this_expression" => text(node, source)
+            .map(|raw| raw.chars().filter(|ch| !ch.is_whitespace()).collect())
+            .filter(|name: &String| !name.is_empty()),
+        // A constructor or factory call used as a receiver should contribute
+        // its callee only; its argument text must never become part of an edge
+        // target.
+        "call_expression" => callee_name(node, source),
+        "navigation_expression" => normalized_navigation_name(node, source),
+        _ => qualified_or_terminal_name(node, source),
+    }
+}
+
 fn should_skip_call(name: &str) -> bool {
     matches!(
         name,
@@ -1257,7 +1539,25 @@ fn should_skip_call(name: &str) -> bool {
     )
 }
 
-fn parse_imports(language: &str, raw: &str) -> Vec<Import> {
+fn parse_imports(language: &str, node: TsNode, source: &[u8], raw: &str) -> Vec<Import> {
+    match language {
+        "typescript" | "tsx" | "javascript" => {
+            if let Some(import) = parse_javascript_import(node, source) {
+                return vec![import];
+            }
+        }
+        "python" if node.kind() == "import_from_statement" => {
+            if let Some(import) = parse_python_from_import(node, source) {
+                return vec![import];
+            }
+        }
+        _ => {}
+    }
+
+    parse_imports_from_text(language, raw)
+}
+
+fn parse_imports_from_text(language: &str, raw: &str) -> Vec<Import> {
     let trimmed = raw.trim();
     match language {
         "ruby" if !trimmed.starts_with("require") => return Vec::new(),
@@ -1303,6 +1603,125 @@ fn parse_python_import(raw: &str) -> Vec<Import> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Parse ECMAScript named imports through the grammar's `source` field and
+/// `import_clause > named_imports > import_specifier` shape. Default and
+/// namespace imports have no `named_imports` child, so they deliberately keep
+/// an empty symbol list.
+fn parse_javascript_import(node: TsNode, source: &[u8]) -> Option<Import> {
+    let source_node = node.child_by_field_name("source")?;
+    let path = import_string_contents(&text(source_node, source)?);
+    if path.is_empty() {
+        return None;
+    }
+
+    Some(import_with_symbols(
+        path,
+        javascript_named_import_symbols(node, source),
+    ))
+}
+
+fn javascript_named_import_symbols(node: TsNode, source: &[u8]) -> Vec<String> {
+    let mut symbols = Vec::new();
+    let mut statement_cursor = node.walk();
+    for clause in node
+        .named_children(&mut statement_cursor)
+        .filter(|child| child.kind() == "import_clause")
+    {
+        let mut clause_cursor = clause.walk();
+        for named_imports in clause
+            .named_children(&mut clause_cursor)
+            .filter(|child| child.kind() == "named_imports")
+        {
+            let mut named_imports_cursor = named_imports.walk();
+            for specifier in named_imports
+                .named_children(&mut named_imports_cursor)
+                .filter(|child| child.kind() == "import_specifier")
+            {
+                if let Some(symbol) = javascript_import_symbol(specifier, source) {
+                    symbols.push(symbol);
+                }
+            }
+        }
+    }
+    symbols
+}
+
+fn javascript_import_symbol(specifier: TsNode, source: &[u8]) -> Option<String> {
+    let name =
+        text(specifier.child_by_field_name("name")?, source).map(|name| name.trim().to_string())?;
+    // `import { default as Local }` is still a default import, not evidence
+    // that a normal named symbol called `default` is available.
+    if name.is_empty() || name == "default" {
+        return None;
+    }
+
+    let alias = specifier
+        .child_by_field_name("alias")
+        .and_then(|alias| text(alias, source))
+        .map(|alias| alias.trim().to_string())
+        .filter(|alias| !alias.is_empty());
+    Some(match alias {
+        Some(alias) => format!("{name} as {alias}"),
+        None => name,
+    })
+}
+
+/// Parse `from module import name` using the Python grammar's `module_name`
+/// and repeated `name` fields. Wildcard imports have no `name` fields and are
+/// intentionally represented as a symbol-free module import.
+fn parse_python_from_import(node: TsNode, source: &[u8]) -> Option<Import> {
+    let path = text(node.child_by_field_name("module_name")?, source)
+        .map(|path| path.trim().to_string())?;
+    if path.is_empty() {
+        return None;
+    }
+
+    let mut cursor = node.walk();
+    let symbols = node
+        .children_by_field_name("name", &mut cursor)
+        .filter_map(|name| python_from_import_symbol(name, source))
+        .collect();
+    Some(import_with_symbols(path, symbols))
+}
+
+fn python_from_import_symbol(name: TsNode, source: &[u8]) -> Option<String> {
+    let imported = match name.kind() {
+        "dotted_name" => text(name, source).map(|name| name.trim().to_string()),
+        "aliased_import" => {
+            text(name.child_by_field_name("name")?, source).map(|name| name.trim().to_string())
+        }
+        _ => None,
+    }?;
+    if imported.is_empty() {
+        return None;
+    }
+
+    let alias = name
+        .child_by_field_name("alias")
+        .and_then(|alias| text(alias, source))
+        .map(|alias| alias.trim().to_string())
+        .filter(|alias| !alias.is_empty());
+    Some(match alias {
+        Some(alias) => format!("{imported} as {alias}"),
+        None => imported,
+    })
+}
+
+fn import_string_contents(raw: &str) -> String {
+    raw.trim().trim_matches('"').trim_matches('\'').to_string()
+}
+
+fn import_with_symbols(path: String, symbols: Vec<String>) -> Import {
+    let mut import = module_import(path);
+    // Preserve the established relative-path classification. For non-relative
+    // paths, a proven symbol list is the data model's `Named` import form.
+    if !symbols.is_empty() && import.kind == ImportKind::Module {
+        import.kind = ImportKind::Named;
+    }
+    import.symbols = symbols;
+    import
 }
 
 fn parse_c_include(raw: &str) -> Vec<Import> {
@@ -1428,4 +1847,240 @@ fn ancestors(mut node: TsNode) -> impl Iterator<Item = TsNode> {
         node = node.parent()?;
         Some(node)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    const EMPTY: &[&str] = &[];
+
+    fn kotlin_language() -> tree_sitter::Language {
+        tree_sitter_kotlin_ng::LANGUAGE.into()
+    }
+
+    static KOTLIN_CONFIG: TreeSitterLanguageConfig = TreeSitterLanguageConfig {
+        id: "kotlin",
+        language: kotlin_language,
+        function_types: &["function_declaration"],
+        class_types: &["class_declaration"],
+        method_types: &["function_declaration", "secondary_constructor"],
+        interface_types: EMPTY,
+        interface_kind: NodeKind::Trait,
+        struct_types: EMPTY,
+        enum_types: EMPTY,
+        enum_member_types: &["enum_entry"],
+        type_alias_types: &["type_alias"],
+        import_types: &["import"],
+        call_types: &["call_expression"],
+        variable_types: &["property_declaration"],
+        field_types: &["property_declaration"],
+        property_types: EMPTY,
+        extra_class_types: &["object_declaration", "companion_object"],
+        name_field: "name",
+        body_field: "body",
+        methods_are_top_level: true,
+    };
+
+    fn extract_kotlin(source: &str) -> ExtractionResult {
+        GenericTreeSitterExtractor {
+            config: &KOTLIN_CONFIG,
+        }
+        .extract(source.as_bytes(), Path::new("Screen.kt"))
+        .expect("Kotlin source should extract")
+    }
+
+    fn kotlin_field_declared_type<'a>(
+        result: &'a ExtractionResult,
+        field_name: &str,
+    ) -> Option<&'a str> {
+        result
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Field && node.name == field_name)
+            .and_then(|node| node.metadata.get("grapha.declared_type"))
+            .map(String::as_str)
+    }
+
+    #[test]
+    fn kotlin_androidx_view_model_delegates_emit_declared_types() {
+        let result = extract_kotlin(
+            r#"
+            import androidx.fragment.app.viewModels
+            import androidx.fragment.app.activityViewModels
+
+            class Screen {
+                val screenModel by viewModels<ScreenViewModel>()
+                val hostModel by activityViewModels<HostViewModel>()
+            }
+            "#,
+        );
+
+        assert!(
+            result
+                .imports
+                .iter()
+                .any(|import| import.path == "androidx.fragment.app.viewModels")
+        );
+        assert!(
+            result
+                .imports
+                .iter()
+                .any(|import| import.path == "androidx.fragment.app.activityViewModels")
+        );
+        assert_eq!(
+            kotlin_field_declared_type(&result, "screenModel"),
+            Some("ScreenViewModel")
+        );
+        assert_eq!(
+            kotlin_field_declared_type(&result, "hostModel"),
+            Some("HostViewModel")
+        );
+    }
+
+    #[test]
+    fn kotlin_explicit_property_types_take_priority_over_delegates() {
+        let result = extract_kotlin(
+            r#"
+            import androidx.fragment.app.viewModels
+
+            class Screen {
+                val priority: ExplicitViewModel by viewModels<DelegateViewModel>()
+                val nullable: NullableViewModel? by viewModels<DelegateViewModel>()
+                val unsupported: Outer.ExplicitViewModel by viewModels<DelegateViewModel>()
+            }
+            "#,
+        );
+
+        assert_eq!(
+            kotlin_field_declared_type(&result, "priority"),
+            Some("ExplicitViewModel")
+        );
+        assert_eq!(
+            kotlin_field_declared_type(&result, "nullable"),
+            Some("NullableViewModel")
+        );
+        assert_eq!(kotlin_field_declared_type(&result, "unsupported"), None);
+    }
+
+    #[test]
+    fn kotlin_view_model_delegate_metadata_rejects_unproven_forms() {
+        let unimported = extract_kotlin(
+            r#"
+            class Screen {
+                val missingImport by viewModels<MissingImportViewModel>()
+            }
+            "#,
+        );
+        assert_eq!(
+            kotlin_field_declared_type(&unimported, "missingImport"),
+            None
+        );
+
+        let result = extract_kotlin(
+            r#"
+            import androidx.fragment.app.viewModels
+
+            class Screen {
+                val fast by fastLazy<FastViewModel>()
+                val nested by viewModels<Outer.NestedViewModel>()
+                val qualified by viewModels<external.QualifiedViewModel>()
+                val generic by viewModels<GenericViewModel<String>>()
+                val nullableDelegate by viewModels<NullableViewModel?>()
+                val variance by viewModels<out VariantViewModel>()
+                val wildcard by viewModels<*>()
+                val chained by factory().viewModels<ChainedViewModel>()
+            }
+            "#,
+        );
+
+        for field in [
+            "fast",
+            "nested",
+            "qualified",
+            "generic",
+            "nullableDelegate",
+            "variance",
+            "wildcard",
+            "chained",
+        ] {
+            assert_eq!(
+                kotlin_field_declared_type(&result, field),
+                None,
+                "{field} must not gain inferred metadata"
+            );
+        }
+
+        let non_exact_imports = extract_kotlin(
+            r#"
+            import androidx.fragment.app.viewModels as fragmentViewModels
+            import androidx.fragment.app.*
+
+            class Screen {
+                val aliasImport by viewModels<AliasImportViewModel>()
+                val wildcardImport by viewModels<WildcardImportViewModel>()
+            }
+            "#,
+        );
+        assert_eq!(
+            kotlin_field_declared_type(&non_exact_imports, "aliasImport"),
+            None
+        );
+        assert_eq!(
+            kotlin_field_declared_type(&non_exact_imports, "wildcardImport"),
+            None
+        );
+    }
+
+    #[test]
+    fn normalizes_kotlin_constructor_chain_call_targets() {
+        let result = extract_kotlin(
+            r#"
+            class Screen {
+                fun initComponents() {
+                    ChooseBetComp(this, binding).attach()
+                }
+            }
+            "#,
+        );
+
+        let target = result
+            .edges
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::Calls && edge.target.ends_with(".attach"))
+            .map(|edge| edge.target.as_str())
+            .expect("constructor-chain call edge");
+
+        assert_eq!(target, "ChooseBetComp.attach");
+        assert!(!target.contains('('));
+    }
+
+    #[test]
+    fn keeps_kotlin_super_calls_qualified() {
+        let result = extract_kotlin(
+            r#"
+            open class Parent {
+                open fun initComponents() {}
+            }
+
+            class Screen : Parent() {
+                fun setup() {
+                    super.initComponents()
+                }
+            }
+            "#,
+        );
+
+        let targets = result
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::Calls)
+            .map(|edge| edge.target.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(targets.contains(&"super.initComponents"));
+        assert!(!targets.contains(&"initComponents"));
+    }
 }

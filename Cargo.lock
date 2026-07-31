@@ -1024,6 +1024,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tree-sitter",
+ "tree-sitter-kotlin-ng",
 ]
 
 [[package]]

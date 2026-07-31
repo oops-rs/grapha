@@ -554,10 +554,11 @@ fn flow_trace_swiftui_view_falls_back_to_body_or_actions() {
         .stdout(predicate::str::contains("fallback_used: true"))
         .stdout(predicate::str::contains("traced_roots:"))
         .stdout(predicate::str::contains("onShare"))
+        .stdout(predicate::str::contains("flows (3)"))
+        .stdout(predicate::str::contains("onShare"))
         .stdout(predicate::str::contains(
-            "hint: no dataflow edges were found from this symbol or its local SwiftUI roots",
-        ))
-        .stdout(predicate::str::contains("flows (0)"));
+            "save [terminal:persistence unknown unknown]",
+        ));
 }
 
 #[test]

@@ -1,0 +1,392 @@
+{
+  "schema_version": 1,
+  "baseline_description": "Generated from observed current known-good fixture outcomes; these values are a baseline, not aspirational P1 targets.",
+  "languages": {
+    "c": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 2,
+        "functions_total": 4,
+        "percent": "50.00%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 0,
+        "documented_declarations_total": 1,
+        "percent": "0.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 13,
+        "dropped_unresolved_edges": 2,
+        "percent_of_input_edges": "15.38%",
+        "dropped_by_reason": {
+          "no_candidate": 2
+        }
+      },
+      "node_kind_histogram": {
+        "constant": 1,
+        "file": 2,
+        "function": 4,
+        "import": 1,
+        "type_alias": 2
+      }
+    },
+    "cpp": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 2,
+        "functions_total": 5,
+        "percent": "40.00%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 0,
+        "documented_declarations_total": 1,
+        "percent": "0.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 23,
+        "dropped_unresolved_edges": 1,
+        "percent_of_input_edges": "4.35%",
+        "dropped_by_reason": {}
+      },
+      "node_kind_histogram": {
+        "class": 2,
+        "enum": 1,
+        "field": 2,
+        "file": 2,
+        "function": 5,
+        "import": 4,
+        "variant": 2
+      }
+    },
+    "csharp": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 2,
+        "functions_total": 4,
+        "percent": "50.00%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 1,
+        "documented_declarations_total": 1,
+        "percent": "100.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 22,
+        "dropped_unresolved_edges": 3,
+        "percent_of_input_edges": "13.64%",
+        "dropped_by_reason": {
+          "no_candidate": 3
+        }
+      },
+      "node_kind_histogram": {
+        "class": 3,
+        "enum": 1,
+        "field": 2,
+        "file": 2,
+        "function": 4,
+        "import": 2,
+        "trait": 1,
+        "variant": 2
+      }
+    },
+    "dart": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 0,
+        "functions_total": 5,
+        "percent": "0.00%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 1,
+        "documented_declarations_total": 1,
+        "percent": "100.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 13,
+        "dropped_unresolved_edges": 0,
+        "percent_of_input_edges": "0.00%",
+        "dropped_by_reason": {}
+      },
+      "node_kind_histogram": {
+        "class": 3,
+        "enum": 1,
+        "file": 2,
+        "function": 5,
+        "import": 1
+      }
+    },
+    "go": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 3,
+        "functions_total": 5,
+        "percent": "60.00%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 0,
+        "documented_declarations_total": 1,
+        "percent": "0.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 13,
+        "dropped_unresolved_edges": 2,
+        "percent_of_input_edges": "15.38%",
+        "dropped_by_reason": {
+          "no_candidate": 1
+        }
+      },
+      "node_kind_histogram": {
+        "file": 2,
+        "function": 5,
+        "import": 1,
+        "type_alias": 1
+      }
+    },
+    "java": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 3,
+        "functions_total": 5,
+        "percent": "60.00%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 0,
+        "documented_declarations_total": 1,
+        "percent": "0.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 22,
+        "dropped_unresolved_edges": 3,
+        "percent_of_input_edges": "13.64%",
+        "dropped_by_reason": {
+          "no_candidate": 2
+        }
+      },
+      "node_kind_histogram": {
+        "class": 3,
+        "enum": 1,
+        "field": 2,
+        "file": 2,
+        "function": 5,
+        "import": 1,
+        "variant": 2
+      }
+    },
+    "javascript": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 2,
+        "functions_total": 4,
+        "percent": "50.00%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 0,
+        "documented_declarations_total": 1,
+        "percent": "0.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 12,
+        "dropped_unresolved_edges": 3,
+        "percent_of_input_edges": "25.00%",
+        "dropped_by_reason": {
+          "no_candidate": 2
+        }
+      },
+      "node_kind_histogram": {
+        "class": 1,
+        "constant": 1,
+        "file": 2,
+        "function": 4,
+        "import": 1
+      }
+    },
+    "kotlin": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 4,
+        "functions_total": 6,
+        "percent": "66.67%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 0,
+        "documented_declarations_total": 1,
+        "percent": "0.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 20,
+        "dropped_unresolved_edges": 1,
+        "percent_of_input_edges": "5.00%",
+        "dropped_by_reason": {
+          "no_candidate": 1
+        }
+      },
+      "node_kind_histogram": {
+        "class": 2,
+        "enum": 1,
+        "field": 2,
+        "file": 2,
+        "function": 6,
+        "trait": 1,
+        "variant": 2
+      }
+    },
+    "pascal": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 0,
+        "functions_total": 6,
+        "percent": "0.00%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 0,
+        "documented_declarations_total": 1,
+        "percent": "0.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 13,
+        "dropped_unresolved_edges": 1,
+        "percent_of_input_edges": "7.69%",
+        "dropped_by_reason": {
+          "no_candidate": 1
+        }
+      },
+      "node_kind_histogram": {
+        "file": 2,
+        "function": 6,
+        "type_alias": 5
+      }
+    },
+    "php": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 3,
+        "functions_total": 5,
+        "percent": "60.00%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 0,
+        "documented_declarations_total": 1,
+        "percent": "0.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 24,
+        "dropped_unresolved_edges": 6,
+        "percent_of_input_edges": "25.00%",
+        "dropped_by_reason": {
+          "no_candidate": 5
+        }
+      },
+      "node_kind_histogram": {
+        "class": 3,
+        "enum": 1,
+        "field": 2,
+        "file": 2,
+        "function": 5,
+        "import": 1,
+        "trait": 1
+      }
+    },
+    "python": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 2,
+        "functions_total": 4,
+        "percent": "50.00%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 0,
+        "documented_declarations_total": 1,
+        "percent": "0.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 17,
+        "dropped_unresolved_edges": 3,
+        "percent_of_input_edges": "17.65%",
+        "dropped_by_reason": {
+          "no_candidate": 3
+        }
+      },
+      "node_kind_histogram": {
+        "class": 2,
+        "file": 2,
+        "function": 4,
+        "import": 1,
+        "variable": 1
+      }
+    },
+    "ruby": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 3,
+        "functions_total": 4,
+        "percent": "75.00%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 1,
+        "documented_declarations_total": 1,
+        "percent": "100.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 17,
+        "dropped_unresolved_edges": 6,
+        "percent_of_input_edges": "35.29%",
+        "dropped_by_reason": {
+          "no_candidate": 5
+        }
+      },
+      "node_kind_histogram": {
+        "class": 2,
+        "file": 2,
+        "function": 4,
+        "import": 1,
+        "variable": 1
+      }
+    },
+    "tsx": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 1,
+        "functions_total": 4,
+        "percent": "25.00%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 0,
+        "documented_declarations_total": 1,
+        "percent": "0.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 15,
+        "dropped_unresolved_edges": 2,
+        "percent_of_input_edges": "13.33%",
+        "dropped_by_reason": {
+          "no_candidate": 1
+        }
+      },
+      "node_kind_histogram": {
+        "class": 1,
+        "component": 1,
+        "constant": 1,
+        "field": 2,
+        "file": 2,
+        "function": 4,
+        "import": 1
+      }
+    },
+    "typescript": {
+      "functions_with_outgoing_call_coverage": {
+        "functions_with_outgoing_calls": 2,
+        "functions_total": 3,
+        "percent": "66.67%"
+      },
+      "documented_declaration_capture": {
+        "documented_declarations_captured": 0,
+        "documented_declarations_total": 1,
+        "percent": "0.00%"
+      },
+      "unresolved_edge_drop_rate": {
+        "input_edges": 18,
+        "dropped_unresolved_edges": 3,
+        "percent_of_input_edges": "16.67%",
+        "dropped_by_reason": {
+          "no_candidate": 2
+        }
+      },
+      "node_kind_histogram": {
+        "class": 2,
+        "constant": 1,
+        "enum": 1,
+        "field": 2,
+        "file": 2,
+        "function": 3,
+        "import": 1
+      }
+    }
+  }
+}
