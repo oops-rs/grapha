@@ -5,11 +5,13 @@ mod localization;
 mod swiftui;
 
 pub use assets::{enrich_asset_references_with_tree, source_contains_image_asset_markers};
+#[cfg(all(test, not(feature = "swift-optimizations")))]
+pub use extract::enrich_codegraph_compat_with_tree;
 #[cfg(test)]
 pub use extract::enrich_doc_comments;
-pub use extract::{
-    SwiftExtractor, enrich_codegraph_compat_with_tree, enrich_doc_comments_with_tree, parse_swift,
-};
+pub use extract::{SwiftExtractor, parse_swift};
+#[cfg(feature = "swift-optimizations")]
+pub use extract::{enrich_codegraph_compat_with_tree, enrich_doc_comments_with_tree};
 #[cfg(test)]
 #[allow(unused_imports)]
 pub use localization::enrich_localization_metadata;

@@ -157,8 +157,8 @@ impl Op {
 /// The per-language quality tier grapha provides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LanguageTier {
-    /// Deep, language-aware extraction (Rust via tree-sitter, Swift via
-    /// libIndexStore + SwiftSyntax): full graph ops.
+    /// Deep, language-aware extraction (Rust and Swift with the optional
+    /// IndexStore/SwiftSyntax feature): full graph ops.
     Deep,
     /// Tree-sitter-only structural extraction: symbol/context/usages are
     /// partial, and the deeper semantic graph ops (concept/impact/trace) are
@@ -167,11 +167,12 @@ pub enum LanguageTier {
 }
 
 /// Map a grapha language id (the `LanguagePlugin::id` / tree-sitter config id)
-/// to its capability tier. `rust` and `swift` are deep; the polyglot
-/// tree-sitter languages are best-effort.
+/// to its capability tier. Rust is always deep. Swift is deep only with the
+/// `swift-optimizations` feature; otherwise it is tree-sitter-only.
 pub fn language_tier(language: &str) -> LanguageTier {
     match language {
-        "rust" | "swift" => LanguageTier::Deep,
+        "rust" => LanguageTier::Deep,
+        "swift" if cfg!(feature = "swift-optimizations") => LanguageTier::Deep,
         _ => LanguageTier::TreeSitter,
     }
 }
@@ -672,29 +673,36 @@ mod tests {
     //
     // The matrix is the source of truth grapha publishes and nous consumes.
     // The two axes (availability × served_by) are orthogonal and never
-    // flattened. Swift and Rust are the named "deep" languages; everything
-    // else is tree-sitter-only.
+    // flattened. Rust is always deep; Swift is deep only when the optional
+    // Swift-optimization feature is enabled. Everything else is tree-sitter-only.
 
-    // Acceptance: docs/adr/0027-portable-code-index-artifacts.md Decision 7
-    // ("Swift/Rust deep"). Swift must be a deep two-axis language exactly like
-    // Rust, since its libIndexStore/SwiftSyntax signal is the motivating case.
+    // Swift's published capability follows the build feature: it is only deep
+    // when the optional IndexStore/SwiftSyntax waterfall is present.
     #[test]
-    fn test_capabilities_for_language_swift_is_deep() {
+    fn test_capabilities_for_language_swift_matches_the_enabled_extractor() {
         let caps = capabilities_for_language("swift");
-        // All deep graph ops are full/graph for a deep language.
+        let structural = if cfg!(feature = "swift-optimizations") {
+            Availability::Full
+        } else {
+            Availability::Partial
+        };
+        let semantic = if cfg!(feature = "swift-optimizations") {
+            Availability::Full
+        } else {
+            Availability::Unsupported
+        };
         for op in ["search_symbols", "context", "usages", "dependents"] {
             assert_eq!(
                 caps[op],
-                Capability::graph(Availability::Full),
-                "swift {op} should be full/graph"
+                Capability::graph(structural),
+                "swift {op} capability must match the enabled extractor"
             );
         }
-        // Deep *semantic* ops are also full/graph for a deep language.
         for op in ["concept", "impact", "trace"] {
             assert_eq!(
                 caps[op],
-                Capability::graph(Availability::Full),
-                "swift {op} should be full/graph"
+                Capability::graph(semantic),
+                "swift {op} capability must match the enabled extractor"
             );
         }
     }
@@ -803,9 +811,16 @@ mod tests {
     }
 
     #[test]
-    fn test_language_tier_rust_and_swift_deep_others_tree_sitter() {
+    fn test_language_tier_matches_enabled_swift_extractor() {
         assert_eq!(language_tier("rust"), LanguageTier::Deep);
-        assert_eq!(language_tier("swift"), LanguageTier::Deep);
+        assert_eq!(
+            language_tier("swift"),
+            if cfg!(feature = "swift-optimizations") {
+                LanguageTier::Deep
+            } else {
+                LanguageTier::TreeSitter
+            }
+        );
         for language in ["python", "go", "typescript", "java", "", "RUST", "Swift"] {
             // Note: matching is exact/case-sensitive on the plugin id.
             assert_eq!(
@@ -820,8 +835,8 @@ mod tests {
     // availability per op across the artifact's languages.
     #[test]
     fn test_merge_capabilities_deep_language_lifts_semantic_ops() {
-        // Swift (deep) + python (tree-sitter): swift lifts the semantic ops.
-        let merged = merge_capabilities(&["python".to_string(), "swift".to_string()]);
+        // Rust (deep) + python (tree-sitter): Rust lifts the semantic ops.
+        let merged = merge_capabilities(&["python".to_string(), "rust".to_string()]);
         assert_eq!(merged["impact"].availability, Availability::Full);
         assert_eq!(merged["trace"].availability, Availability::Full);
         assert_eq!(merged["concept"].availability, Availability::Full);

@@ -24,6 +24,11 @@ fn main() {
         println!("cargo:rerun-if-changed={path}");
     }
 
+    if std::env::var_os("CARGO_FEATURE_SWIFT_OPTIMIZATIONS").is_none() {
+        disable_bridge("swift-optimizations feature disabled (using tree-sitter)");
+        return;
+    }
+
     if mode == BridgeMode::Off {
         disable_bridge("off (skipping Swift bridge build)");
         return;

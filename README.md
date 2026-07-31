@@ -10,7 +10,7 @@ Grapha is a fast code intelligence CLI and MCP server for building a normalized,
 - Which entry points can reach this API, database write, cache access, or event publish?
 - Which files, modules, and concepts should I inspect before editing?
 
-Grapha does not treat source as plain text. For Swift, it reads Xcode's pre-built index store through binary FFI when available, then falls back through SwiftSyntax and tree-sitter. For Rust, it uses a dedicated tree-sitter extractor with Cargo workspace awareness. Other supported languages use best-effort tree-sitter extraction for symbols, containment, imports, and name-based relationships.
+Grapha does not treat source as plain text. Swift uses tree-sitter by default. On macOS, the optional `swift-optimizations` feature adds Xcode's pre-built index store and SwiftSyntax ahead of tree-sitter. Rust uses a dedicated tree-sitter extractor with Cargo workspace awareness. Other supported languages use best-effort tree-sitter extraction for symbols, containment, imports, and name-based relationships.
 
 > Benchmark: 1,991 Swift files, about 300K lines, 131K nodes, and 784K edges indexed in 8.7 seconds on a production iOS app.
 
@@ -18,8 +18,8 @@ Grapha does not treat source as plain text. For Swift, it reads Xcode's pre-buil
 
 | Need | Grapha answer |
 |------|---------------|
-| High-confidence Swift relationships | Xcode index store USRs when available, with confidence-scored graph edges |
-| Fast fallback parsing | SwiftSyntax and bundled tree-sitter paths for useful results without a successful build |
+| High-confidence Swift relationships | Opt-in Xcode index store USRs, with confidence-scored graph edges |
+| Portable Swift parsing | Bundled tree-sitter works without Xcode or a successful build |
 | Agent-ready context | CLI output plus MCP tools for search, context, impact, dataflow, smells, and concepts |
 | Change planning | Impact analysis, reverse traces to entry points, repo changes, and architecture checks |
 | Product vocabulary | Concept lookup across bindings, aliases, localization strings, assets, and symbols |
@@ -34,6 +34,16 @@ brew install grapha
 
 ```bash
 cargo install grapha
+```
+
+### Optional macOS Swift optimizations
+
+The default build never loads IndexStore or SwiftSyntax; Swift is always parsed
+with tree-sitter. Opt into the macOS/Xcode waterfall when compiler-resolved
+Swift symbols are worth the extra dependency:
+
+```bash
+cargo install grapha --features swift-optimizations
 ```
 
 ### Docker
@@ -342,13 +352,16 @@ Global developer defaults can live in `$GRAPHA_CONFIG`, `$XDG_CONFIG_HOME/grapha
 
 ```text
 grapha-core/     Shared graph, extraction, semantic, selector, and plugin types
-grapha-swift/    Swift extraction: index store -> SwiftSyntax -> tree-sitter
+grapha-swift/    Tree-sitter Swift extraction; optional IndexStore + SwiftSyntax
 grapha-engine/   Library engine: extraction, query engines, persistence, and language plugins
 grapha/          CLI binary, MCP server, and web UI
 nodus/           Agent tooling package with skills, rules, and commands
 ```
 
-### Swift Extraction Waterfall
+### Optional Swift Extraction Waterfall
+
+Without `swift-optimizations`, Grapha always uses `tree-sitter-swift`. The
+feature enables this macOS-only waterfall:
 
 ```text
 Xcode Index Store (binary FFI) -> compiler-resolved USRs, confidence 1.0
@@ -387,7 +400,7 @@ The resulting graph contained 131,185 nodes, 783,793 edges, 2,983 entry points, 
 
 | Language | Extraction | Type resolution |
 |----------|------------|-----------------|
-| Swift | Xcode index store, SwiftSyntax, tree-sitter | Compiler-grade USRs when index store is available |
+| Swift | tree-sitter by default; optional Xcode index store and SwiftSyntax | Compiler-grade USRs with `swift-optimizations` |
 | Rust | Dedicated tree-sitter extractor | Name-based |
 | TypeScript / TSX / JavaScript | Generic tree-sitter extractor | Name-based |
 | Python / Go / Java / C / C++ / C# | Generic tree-sitter extractor | Name-based |

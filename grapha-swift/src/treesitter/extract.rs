@@ -53,6 +53,7 @@ impl LanguageExtractor for SwiftExtractor {
     }
 }
 
+#[cfg(any(feature = "swift-optimizations", test))]
 pub fn enrich_codegraph_compat_with_tree(
     source: &[u8],
     file_path: &Path,
@@ -212,6 +213,7 @@ fn extract_swift_framework_nodes(result: &mut ExtractionResult, source: &[u8], f
     }
 }
 
+#[cfg(any(feature = "swift-optimizations", test))]
 fn extract_import_nodes_from_tree(
     node: tree_sitter::Node,
     source: &[u8],
@@ -1335,6 +1337,7 @@ pub fn enrich_doc_comments(source: &[u8], result: &mut ExtractionResult) -> anyh
     enrich_doc_comments_with_tree(source, &tree, result)
 }
 
+#[cfg(any(feature = "swift-optimizations", test))]
 pub fn enrich_doc_comments_with_tree(
     source: &[u8],
     tree: &Tree,
@@ -1371,6 +1374,7 @@ pub fn enrich_doc_comments_with_tree(
 
 /// Recursively walk the tree-sitter AST and collect doc comments for every
 /// declaration that has one.  Results are keyed by `(name, 1-based line)`.
+#[cfg(any(feature = "swift-optimizations", test))]
 fn collect_doc_comments(
     node: tree_sitter::Node,
     source: &[u8],

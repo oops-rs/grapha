@@ -53,6 +53,12 @@ urlencoding = "2"
 langcodec = "0.13"
 xcassets = "0.2"
 
+[features]
+default = []
+# Opt in to Grapha's macOS/Xcode Swift extraction waterfall. The default CLI
+# uses tree-sitter for Swift, just as library consumers using `swift` do.
+swift-optimizations = ["grapha-engine/swift-optimizations", "grapha-swift/swift-optimizations"]
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

@@ -1,15 +1,21 @@
+#[cfg(feature = "swift-optimizations")]
 mod binary;
+#[cfg(feature = "swift-optimizations")]
 mod bridge;
 mod classifier;
 mod graph_pass;
+#[cfg(feature = "swift-optimizations")]
 mod indexstore;
 mod module_discovery;
+#[cfg(feature = "swift-optimizations")]
 mod swiftsyntax;
 mod treesitter;
 
+#[cfg(feature = "swift-optimizations")]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "swift-optimizations")]
 use std::sync::{LazyLock, RwLock};
 use std::time::Instant;
 
@@ -32,6 +38,7 @@ use grapha_core::{
     LanguageRegistry, ModuleMap, ProjectContext, SemanticAnnotation, SemanticDocument,
 };
 
+#[cfg(feature = "swift-optimizations")]
 static INDEX_STORE_PATHS: LazyLock<RwLock<HashMap<PathBuf, Option<PathBuf>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -47,15 +54,19 @@ impl LanguagePlugin for SwiftPlugin {
     }
 
     fn prepare_project(&self, context: &ProjectContext) -> anyhow::Result<()> {
+        #[cfg(feature = "swift-optimizations")]
         if context.index_store_enabled {
             prepare_project_index_store(&context.project_root);
         } else {
             clear_index_store_path(&context.project_root);
         }
+        #[cfg(not(feature = "swift-optimizations"))]
+        let _ = context;
         Ok(())
     }
 
     fn finish_project(&self, _context: &ProjectContext) -> anyhow::Result<()> {
+        #[cfg(feature = "swift-optimizations")]
         indexstore::release_store_handles();
         Ok(())
     }
@@ -131,6 +142,7 @@ pub fn register_builtin(registry: &mut LanguageRegistry) -> anyhow::Result<()> {
 /// Auto-discover the Xcode index store for a project.
 /// Walks up from the given path looking for .xcodeproj/.xcworkspace,
 /// then matches the Xcode project name against DerivedData folders.
+#[cfg(feature = "swift-optimizations")]
 fn discover_index_store(start_path: &Path) -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
     let derived_data = Path::new(&home).join("Library/Developer/Xcode/DerivedData");
@@ -195,10 +207,17 @@ fn discover_index_store(start_path: &Path) -> Option<PathBuf> {
 
 /// Pre-discover the index store path. Call before starting extraction
 /// to ensure the discovery log appears before the progress bar.
+#[cfg(feature = "swift-optimizations")]
 pub fn init_index_store(project_root: &Path) {
     let _ = init_index_store_with(&INDEX_STORE_PATHS, project_root, discover_index_store);
 }
 
+#[cfg(not(feature = "swift-optimizations"))]
+pub fn init_index_store(project_root: &Path) {
+    let _ = project_root;
+}
+
+#[cfg(feature = "swift-optimizations")]
 fn prepare_project_index_store(project_root: &Path) {
     prepare_project_with(&INDEX_STORE_PATHS, project_root, discover_index_store);
     if let Some(store_path) = index_store_path(project_root) {
@@ -206,6 +225,7 @@ fn prepare_project_index_store(project_root: &Path) {
     }
 }
 
+#[cfg(feature = "swift-optimizations")]
 fn prepare_project_with<F>(
     cache: &RwLock<HashMap<PathBuf, Option<PathBuf>>>,
     project_root: &Path,
@@ -216,6 +236,7 @@ fn prepare_project_with<F>(
     let _ = refresh_index_store_with(cache, project_root, discover);
 }
 
+#[cfg(feature = "swift-optimizations")]
 fn set_index_store_path_in(
     cache: &RwLock<HashMap<PathBuf, Option<PathBuf>>>,
     project_root: &Path,
@@ -228,10 +249,19 @@ fn set_index_store_path_in(
 }
 
 /// Force index-store rediscovery for a project, including after a cached miss.
+#[cfg(feature = "swift-optimizations")]
 pub fn refresh_index_store(project_root: &Path) -> Option<PathBuf> {
     refresh_index_store_with(&INDEX_STORE_PATHS, project_root, discover_index_store)
 }
 
+/// This feature-disabled build never discovers or reads Xcode IndexStore data.
+#[cfg(not(feature = "swift-optimizations"))]
+pub fn refresh_index_store(project_root: &Path) -> Option<PathBuf> {
+    let _ = project_root;
+    None
+}
+
+#[cfg(feature = "swift-optimizations")]
 fn init_index_store_with<F>(
     cache: &RwLock<HashMap<PathBuf, Option<PathBuf>>>,
     project_root: &Path,
@@ -256,6 +286,7 @@ where
     discovered
 }
 
+#[cfg(feature = "swift-optimizations")]
 fn refresh_index_store_with<F>(
     cache: &RwLock<HashMap<PathBuf, Option<PathBuf>>>,
     project_root: &Path,
@@ -271,6 +302,7 @@ where
     init_index_store_with(cache, project_root, discover)
 }
 
+#[cfg(feature = "swift-optimizations")]
 fn project_cache_key(project_root: &Path) -> PathBuf {
     if project_root.extension().is_some_and(|ext| ext == "swift") {
         project_root.parent().unwrap_or(project_root).to_path_buf()
@@ -279,16 +311,31 @@ fn project_cache_key(project_root: &Path) -> PathBuf {
     }
 }
 
+#[cfg(feature = "swift-optimizations")]
 pub fn index_store_path(project_root: &Path) -> Option<PathBuf> {
     index_store_path_in(&INDEX_STORE_PATHS, project_root)
+}
+
+/// This feature-disabled build never discovers or reads Xcode IndexStore data.
+#[cfg(not(feature = "swift-optimizations"))]
+pub fn index_store_path(project_root: &Path) -> Option<PathBuf> {
+    let _ = project_root;
+    None
 }
 
 /// Seed or clear the cached index-store path for a project.
 ///
 /// This is primarily useful for tests and for explicit cache invalidation when
 /// a caller knows index-store should not be used for a project.
+#[cfg(feature = "swift-optimizations")]
 pub fn set_index_store_path(project_root: &Path, store: Option<PathBuf>) {
     set_index_store_path_in(&INDEX_STORE_PATHS, project_root, store);
+}
+
+/// This feature-disabled build never caches Xcode IndexStore data.
+#[cfg(not(feature = "swift-optimizations"))]
+pub fn set_index_store_path(project_root: &Path, store: Option<PathBuf>) {
+    let _ = (project_root, store);
 }
 
 /// Clear any cached index-store path for a project.
@@ -296,6 +343,7 @@ pub fn clear_index_store_path(project_root: &Path) {
     set_index_store_path(project_root, None);
 }
 
+#[cfg(feature = "swift-optimizations")]
 fn index_store_path_in(
     cache: &RwLock<HashMap<PathBuf, Option<PathBuf>>>,
     project_root: &Path,
@@ -303,6 +351,7 @@ fn index_store_path_in(
     cached_index_store_path_in(cache, project_root).flatten()
 }
 
+#[cfg(feature = "swift-optimizations")]
 fn cached_index_store_path_in(
     cache: &RwLock<HashMap<PathBuf, Option<PathBuf>>>,
     project_root: &Path,
@@ -314,6 +363,7 @@ fn cached_index_store_path_in(
         .cloned()
 }
 
+#[cfg(feature = "swift-optimizations")]
 fn discover_index_store_with<F>(start_path: &Path, mut discover: F) -> Option<PathBuf>
 where
     F: FnMut(&Path) -> Option<PathBuf>,
@@ -425,10 +475,11 @@ fn source_contains_asset_markers(source: &[u8]) -> bool {
     treesitter::source_contains_image_asset_markers(source)
 }
 
-/// Extract Swift source code with waterfall strategy:
-/// 1. Xcode index store (confidence 1.0)
-/// 2. SwiftSyntax bridge (confidence 0.9)
-/// 3. tree-sitter-swift fallback (confidence 0.6-0.8)
+/// Extract Swift source code.
+///
+/// Tree-sitter is always used unless the crate is built with the
+/// `swift-optimizations` feature. That opt-in feature enables the macOS/Xcode
+/// waterfall: IndexStore, then SwiftSyntax, then tree-sitter.
 pub fn extract_swift(
     source: &[u8],
     file_path: &Path,
@@ -436,16 +487,25 @@ pub fn extract_swift(
     project_root: Option<&Path>,
     index_store_enabled: bool,
 ) -> anyhow::Result<ExtractionResult> {
-    extract_swift_with_init(
-        source,
-        file_path,
-        explicit_index_store_path,
-        project_root,
-        index_store_enabled,
-        init_index_store,
-    )
+    #[cfg(feature = "swift-optimizations")]
+    {
+        extract_swift_with_init(
+            source,
+            file_path,
+            explicit_index_store_path,
+            project_root,
+            index_store_enabled,
+            init_index_store,
+        )
+    }
+    #[cfg(not(feature = "swift-optimizations"))]
+    {
+        let _ = (explicit_index_store_path, project_root, index_store_enabled);
+        extract_swift_via_fallback_for_tests(source, file_path)
+    }
 }
 
+#[cfg(feature = "swift-optimizations")]
 fn extract_swift_with_init<F>(
     source: &[u8],
     file_path: &Path,
@@ -619,6 +679,7 @@ where
     Ok(result)
 }
 
+#[cfg(feature = "swift-optimizations")]
 fn restamp_indexstore_file_path(result: &mut ExtractionResult, file_path: &Path) {
     let file_path = file_path.to_path_buf();
     for node in &mut result.nodes {
@@ -678,7 +739,9 @@ pub fn extract_swift_via_fallback_for_tests(
 
 #[cfg(test)]
 mod plugin_tests {
-    use super::{restamp_indexstore_file_path, stamp_swift_module};
+    #[cfg(feature = "swift-optimizations")]
+    use super::restamp_indexstore_file_path;
+    use super::stamp_swift_module;
     use grapha_core::ExtractionResult;
     use grapha_core::graph::{Edge, EdgeKind, EdgeProvenance, Node, NodeKind, Span, Visibility};
     use std::collections::HashMap;
@@ -743,6 +806,7 @@ mod plugin_tests {
         assert_eq!(stamped.nodes[0].module.as_deref(), Some("Feature"));
     }
 
+    #[cfg(feature = "swift-optimizations")]
     #[test]
     fn restamps_indexstore_results_to_project_relative_file_path() {
         let mut result = ExtractionResult {
@@ -794,7 +858,7 @@ mod plugin_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "swift-optimizations"))]
 mod discovery_cache_tests {
     use super::{
         index_store_path_in, init_index_store_with, prepare_project_with, project_cache_key,
@@ -936,15 +1000,14 @@ mod discovery_cache_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "swift-optimizations")))]
 mod index_store_toggle_tests {
-    use super::extract_swift_with_init;
-    use std::cell::Cell;
+    use super::{TIMING_INDEXSTORE_NS, TIMING_SWIFTSYNTAX_NS, extract_swift};
     use std::path::Path;
+    use std::sync::atomic::Ordering;
 
     #[test]
-    fn disabled_index_store_skips_initializer() {
-        let initializer_called = Cell::new(false);
+    fn public_extractor_uses_tree_sitter_when_legacy_optimization_inputs_are_enabled() {
         let source = br#"
         import SwiftUI
 
@@ -955,18 +1018,21 @@ mod index_store_toggle_tests {
         }
         "#;
 
-        let result = extract_swift_with_init(
+        TIMING_INDEXSTORE_NS.store(0, Ordering::Relaxed);
+        TIMING_SWIFTSYNTAX_NS.store(0, Ordering::Relaxed);
+
+        let result = extract_swift(
             source,
             Path::new("ContentView.swift"),
-            None,
-            None,
-            false,
-            |_| initializer_called.set(true),
+            Some(Path::new("/unused/index-store")),
+            Some(Path::new("/unused/project")),
+            true,
         )
         .unwrap();
 
-        assert!(!initializer_called.get());
         assert!(result.nodes.iter().any(|node| node.name == "ContentView"));
+        assert_eq!(TIMING_INDEXSTORE_NS.load(Ordering::Relaxed), 0);
+        assert_eq!(TIMING_SWIFTSYNTAX_NS.load(Ordering::Relaxed), 0);
     }
 }
 

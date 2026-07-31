@@ -58,3 +58,6 @@ tempfile = "3"
 [features]
 default = []
 swift = ["dep:grapha-swift"]
+# Enables grapha-swift's macOS/Xcode IndexStore and SwiftSyntax waterfall.
+# `swift` alone is deliberately tree-sitter-only.
+swift-optimizations = ["swift", "grapha-swift/swift-optimizations"]

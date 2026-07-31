@@ -2,7 +2,7 @@
 name = "grapha-swift"
 version = "0.4.2"
 edition = "2024"
-description = "Swift extraction waterfall for Grapha using index store, SwiftSyntax, and tree-sitter"
+description = "Tree-sitter Swift extraction with optional IndexStore and SwiftSyntax optimization"
 license = "MIT"
 repository = "https://github.com/oops-rs/grapha"
 homepage = "https://github.com/oops-rs/grapha"
@@ -20,6 +20,13 @@ ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libloading = "0.9"
+
+[features]
+default = []
+# Opt in to the macOS/Xcode-specific extraction waterfall. Without this feature,
+# `grapha-swift` always parses Swift with tree-sitter and does not build or load
+# the Swift bridge.
+swift-optimizations = []
 
 [dev-dependencies]
 tempfile = "3"
