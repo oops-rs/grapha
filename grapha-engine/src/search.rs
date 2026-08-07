@@ -381,23 +381,41 @@ pub fn search(index: &Index, query_str: &str, limit: usize) -> Result<Vec<Search
     search_filtered(index, query_str, limit, &SearchOptions::default())
 }
 
+/// Maximum number of query characters woven into a fuzzy pattern.
+///
+/// Each retained character contributes a literal plus a `.*` gap, and tantivy
+/// compiles the result into a DFA capped at 1000 states. The state cost per
+/// character is not constant — it grows with the alphabet the pattern spans, so
+/// a non-ASCII query blows the ceiling far sooner than an ASCII one (measured on
+/// a real index: ~51 ASCII characters, but only ~27 distinct CJK characters).
+/// Truncating here keeps the compiled automaton inside the ceiling for every
+/// script instead of letting `RegexQuery::from_pattern` fail the whole search.
+///
+/// Fuzzy matching is a typo-tolerance affordance for symbol NAMES; no real
+/// identifier approaches this length, so the cap only ever truncates prose that
+/// could not have matched a name anyway.
+const FUZZY_QUERY_CHAR_LIMIT: usize = 24;
+
 /// Build a regex pattern for fuzzy matching on lowercased symbol names.
 /// Inserts `.*` between characters to match substring with gaps, tolerating
 /// typos, transpositions, and partial names.
 /// "GiftPanle" → ".*g.*i.*f.*t.*p.*a.*n.*l.*e.*"
+///
+/// Only the first [`FUZZY_QUERY_CHAR_LIMIT`] alphanumeric characters are woven
+/// in, so the compiled DFA stays inside tantivy's state ceiling for any input.
 fn build_fuzzy_regex(query: &str) -> String {
     let lower = query.to_lowercase();
     let mut pattern = String::with_capacity(lower.len() * 4 + 4);
     pattern.push_str(".*");
-    for ch in lower.chars() {
-        if ch.is_alphanumeric() {
-            // Escape regex metacharacters
-            if "\\^$.|?*+()[]{}".contains(ch) {
-                pattern.push('\\');
-            }
-            pattern.push(ch);
-            pattern.push_str(".*");
-        }
+    for ch in lower
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .take(FUZZY_QUERY_CHAR_LIMIT)
+    {
+        // `is_alphanumeric` already excludes every regex metacharacter, so the
+        // retained character is always safe to emit literally.
+        pattern.push(ch);
+        pattern.push_str(".*");
     }
     pattern
 }
@@ -476,6 +494,64 @@ fn identifier_like_query(query: &str) -> bool {
         && query
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
+}
+
+/// Parse end-user text with tantivy's query DSL, retrying on a sanitized copy
+/// when the raw text is not valid DSL.
+///
+/// Callers pass natural-language questions and identifiers typed by a human,
+/// never hand-written DSL. Characters that are ordinary English punctuation are
+/// DSL syntax to the parser — an apostrophe in `user's` opens an unterminated
+/// phrase, and `:`, `(`, `)`, `[`, `]`, `^`, `+`, `-`, `!`, `"`, `*`, `~` are
+/// all operators — so the raw parse can fail on text that is a perfectly
+/// reasonable search. Replacing those with spaces preserves every search term
+/// while removing the syntax, and returning `None` if even that fails leaves the
+/// caller's other clauses (exact-name, token, relaxed) to carry the query.
+fn parse_user_query(parser: &QueryParser, query_str: &str) -> Option<Box<dyn Query>> {
+    if let Ok(query) = parser.parse_query(query_str) {
+        return Some(Box::new(query) as Box<dyn Query>);
+    }
+    let sanitized = sanitize_query_syntax(query_str);
+    if sanitized.trim().is_empty() {
+        return None;
+    }
+    parser
+        .parse_query(&sanitized)
+        .ok()
+        .map(|query| Box::new(query) as Box<dyn Query>)
+}
+
+/// Replace tantivy DSL metacharacters with spaces, keeping the search terms.
+fn sanitize_query_syntax(query_str: &str) -> String {
+    query_str
+        .chars()
+        .map(|ch| {
+            if matches!(
+                ch,
+                '\'' | '"'
+                    | ':'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '^'
+                    | '+'
+                    | '-'
+                    | '!'
+                    | '*'
+                    | '?'
+                    | '~'
+                    | '\\'
+                    | '/'
+            ) {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect()
 }
 
 fn search_terms_complete_query(fields: SearchFields, query_str: &str) -> Option<Box<dyn Query>> {
@@ -649,8 +725,15 @@ pub fn search_filtered(
     } else {
         let query_parser =
             QueryParser::for_index(index, vec![fields.name, fields.locator, fields.file]);
-        let exact_query = Box::new(query_parser.parse_query(query_str)?) as Box<dyn Query>;
-        let mut query_clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Should, exact_query)];
+        // `query_str` is end-user text, not a hand-written tantivy DSL
+        // expression: a stray apostrophe ("user's"), colon, or bracket is a
+        // parse error, not a search miss. Fall back to the sanitized form so a
+        // natural-language question degrades to a term search instead of
+        // failing the call.
+        let mut query_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        if let Some(exact_query) = parse_user_query(&query_parser, query_str) {
+            query_clauses.push((Occur::Should, exact_query));
+        }
         let identifier_like = identifier_like_query(query_str);
         if identifier_like && let Some(name_query) = exact_name_query(fields, query_str) {
             query_clauses.push((
@@ -2346,6 +2429,101 @@ mod tests {
             "fuzzy search should find 'Config' for misspelling 'confg', got: {:?}",
             results.iter().map(|r| &r.name).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn fuzzy_regex_is_capped_so_a_prose_query_still_compiles() {
+        // A whole question is not a symbol name, but it must not blow tantivy's
+        // 1000-state DFA ceiling: before the cap this errored the whole search.
+        let question =
+            "does the room danmaku use the user's own equipped bubble style or a uniform style";
+        let pattern = build_fuzzy_regex(question);
+        let retained = pattern.matches(".*").count() - 1;
+        assert_eq!(
+            retained, FUZZY_QUERY_CHAR_LIMIT,
+            "a long query should be truncated to the cap, got {retained} characters"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let graph = make_rich_test_graph();
+        let index = build_index(&graph, dir.path()).unwrap();
+        let options = SearchOptions {
+            fuzzy: true,
+            ..Default::default()
+        };
+        assert!(
+            search_filtered(&index, question, 10, &options).is_ok(),
+            "a prose fuzzy query must not fail regex compilation"
+        );
+    }
+
+    #[test]
+    fn fuzzy_regex_cap_holds_for_non_ascii_queries() {
+        // CJK exhausts the DFA budget in far fewer characters than ASCII, so the
+        // cap has to be expressed in characters retained, not bytes.
+        let question = "wyak的房间弹幕样式，是用用户自己佩戴的气泡样式吗，还是统一的样式";
+        let dir = tempfile::tempdir().unwrap();
+        let graph = make_rich_test_graph();
+        let index = build_index(&graph, dir.path()).unwrap();
+        let options = SearchOptions {
+            fuzzy: true,
+            ..Default::default()
+        };
+        assert!(
+            search_filtered(&index, question, 10, &options).is_ok(),
+            "a CJK prose fuzzy query must not fail regex compilation"
+        );
+    }
+
+    #[test]
+    fn fuzzy_regex_keeps_short_identifiers_intact() {
+        // The cap must not change behavior for real symbol names.
+        assert_eq!(
+            build_fuzzy_regex("GiftPanle"),
+            ".*g.*i.*f.*t.*p.*a.*n.*l.*e.*"
+        );
+    }
+
+    #[test]
+    fn search_survives_dsl_punctuation_in_a_natural_language_query() {
+        // Regression: an apostrophe made tantivy's query parser raise
+        // `Syntax Error`, failing the whole search on ordinary English prose.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = make_rich_test_graph();
+        let index = build_index(&graph, dir.path()).unwrap();
+        for query in [
+            "does the config use the user's own value",
+            "config: value",
+            "config (value)",
+            "save_config AND [",
+        ] {
+            assert!(
+                search(&index, query, 10).is_ok(),
+                "query with DSL punctuation must not fail: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn apostrophe_query_still_finds_the_symbol() {
+        // Sanitizing must keep the terms, not just avoid the error.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = make_rich_test_graph();
+        let index = build_index(&graph, dir.path()).unwrap();
+        let results = search(&index, "the config's loader", 10).unwrap();
+        assert!(
+            results.iter().any(|r| r.name.contains("Config")),
+            "sanitized query should still match Config, got: {:?}",
+            results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn sanitize_query_syntax_keeps_words_and_drops_operators() {
+        assert_eq!(sanitize_query_syntax("user's bubble"), "user s bubble");
+        assert_eq!(sanitize_query_syntax("a:b (c)"), "a b  c ");
+        // CJK is untouched — it carries no DSL meaning.
+        assert_eq!(sanitize_query_syntax("弹幕样式"), "弹幕样式");
     }
 
     #[test]

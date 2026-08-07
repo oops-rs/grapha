@@ -1361,7 +1361,13 @@ fn add_symbol_scopes(
     )?;
     let mut seen_result_ids: HashSet<String> =
         results.iter().map(|result| result.id.clone()).collect();
-    for result in search::search_filtered(
+    // The fuzzy pass is a best-effort ranking supplement layered on top of the
+    // exact pass and the comment/snippet scan in `add_symbol_metadata_scopes`.
+    // It must never be able to fail the whole concept search: propagating its
+    // error here would discard results those other arms already found. A query
+    // shaped unlike a symbol name (prose, a whole question) is exactly the case
+    // that can trip regex compilation while the substring arms succeed.
+    match search::search_filtered(
         context.search_index,
         query,
         limit.saturating_mul(4).max(8),
@@ -1369,9 +1375,20 @@ fn add_symbol_scopes(
             fuzzy: true,
             ..SearchOptions::default()
         },
-    )? {
-        if seen_result_ids.insert(result.id.clone()) {
-            results.push(result);
+    ) {
+        Ok(fuzzy_results) => {
+            for result in fuzzy_results {
+                if seen_result_ids.insert(result.id.clone()) {
+                    results.push(result);
+                }
+            }
+        }
+        Err(_) => {
+            // Deliberately silent: this function has no verbose flag, and the
+            // exact pass plus the metadata scan still carry the result set.
+            // `build_fuzzy_regex` caps the pattern so compilation should not
+            // fail here; this arm is the backstop that keeps any future failure
+            // from turning a degraded ranking into a failed search.
         }
     }
     let normalized_query = normalize_match_text(query);
@@ -2445,6 +2462,62 @@ mod tests {
                 .iter()
                 .any(|evidence| evidence.kind == "l10n_value" && evidence.match_kind == "fuzzy")
         );
+    }
+
+    #[test]
+    fn search_concepts_survives_a_prose_query_and_still_matches_comments() {
+        // Regression: a whole natural-language question used to blow tantivy's
+        // regex state ceiling in the fuzzy ranking pass, and the `?` on that
+        // pass failed the ENTIRE concept search — discarding the doc_comment /
+        // snippet substring matches that had already succeeded. The comment
+        // scan is the only arm that sees CJK at all (the BM25 tokenizer drops
+        // Han characters at index time), so the failure was total for a CJK
+        // question even though the evidence was sitting right there.
+        let mut node = make_node(
+            "danmaku-cell-model",
+            "WYRoomDanmakuCellModel",
+            NodeKind::Class,
+            "Modules/WYRoom/Danmu/Model/WYRoomDanmakuCellModel.swift",
+        );
+        node.doc_comment =
+            Some("// 计算展示时间，让弹幕在大约 5 到 8 秒内完全穿过屏幕".to_string());
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![node],
+            edges: Vec::<Edge>::new(),
+        };
+        let (_dir, search_index) = build_search_index(&graph);
+
+        let question = "wyak的房间弹幕样式，是用用户自己佩戴的气泡样式吗，还是统一的样式";
+        let result = search_concepts(
+            &graph,
+            &search_index,
+            &ConceptIndex::default(),
+            &LocalizationCatalogIndex::default(),
+            &AssetCatalogIndex::default(),
+            question,
+            5,
+        )
+        .expect("a prose question must not fail the whole concept search");
+
+        // The question itself is not a verbatim substring of any comment, so it
+        // legitimately finds nothing — the point is that it RETURNS instead of
+        // erroring, leaving the model free to retry with a narrower term.
+        assert!(result.scopes.is_empty());
+
+        // ...and the narrower term the model should reach for still works.
+        let narrowed = search_concepts(
+            &graph,
+            &search_index,
+            &ConceptIndex::default(),
+            &LocalizationCatalogIndex::default(),
+            &AssetCatalogIndex::default(),
+            "弹幕",
+            5,
+        )
+        .unwrap();
+        assert_eq!(narrowed.scopes.len(), 1);
+        assert_eq!(narrowed.scopes[0].symbol.id, "danmaku-cell-model");
     }
 
     #[test]
