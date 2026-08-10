@@ -1,3 +1,15 @@
 [workspace]
 members = ["grapha-core", "grapha-swift", "grapha-engine", "grapha"]
 resolver = "3"
+
+# The distributed CLI is a process boundary, so optimize its release artifact
+# for size and standalone execution. Thin LTO removes cross-crate duplication
+# without the much higher link cost of full LTO; one codegen unit per crate
+# improves intra-crate optimization; and symbol stripping removes the linker
+# symbol table. Grapha has no recovery contract for internal panics, so release
+# builds also omit unwind machinery and treat them as process-fatal.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

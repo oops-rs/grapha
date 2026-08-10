@@ -1,0 +1,7 @@
+_grapha_free_buffer
+_grapha_free_string
+_grapha_indexstore_close
+_grapha_indexstore_extract
+_grapha_indexstore_open
+_grapha_indexstore_warmup
+_grapha_swiftsyntax_extract

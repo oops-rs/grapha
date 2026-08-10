@@ -44,10 +44,29 @@ jobs:
           cargo --version
 
       - name: Build release binary
-        run: cargo build -p grapha --release
+        run: cargo build --locked -p grapha --release --features swift-optimizations
 
       - name: Package release archive
         run: bash .github/scripts/package-release.sh "${{ github.event.release.tag_name }}" "${{ matrix.asset_suffix }}"
+
+      - name: Verify release archive
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          stem="grapha-${tag}-${{ matrix.asset_suffix }}"
+          verify_dir="$(mktemp -d)"
+          tar -xzf "dist/${stem}.tar.gz" -C "${verify_dir}"
+          bundle="${verify_dir}/${stem}"
+
+          test "$("${bundle}/grapha" --version)" = "grapha ${tag#v}"
+          file "${bundle}/grapha" | grep -q "Mach-O 64-bit executable arm64"
+          codesign --verify --verbose=2 "${bundle}/libGraphaSwiftBridge.dylib"
+
+          DYLD_PRINT_LIBRARIES=1 \
+            GRAPHA_SWIFT_BRIDGE_PATH="${bundle}" \
+            "${bundle}/grapha" analyze \
+              grapha-swift/swift-bridge/Sources/GraphaSwiftBridge \
+              --output /dev/null 2> "${verify_dir}/dyld.log"
+          grep -Fq "${bundle}/libGraphaSwiftBridge.dylib" "${verify_dir}/dyld.log"
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2

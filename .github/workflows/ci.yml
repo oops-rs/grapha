@@ -84,4 +84,4 @@ jobs:
         run: swift test --package-path grapha-swift/swift-bridge
 
       - name: Test grapha-swift with required bridge
-        run: cargo test -p grapha-swift
+        run: cargo test --locked -p grapha-swift --features swift-optimizations
