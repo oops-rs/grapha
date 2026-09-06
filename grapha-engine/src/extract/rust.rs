@@ -383,7 +383,18 @@ fn walk_node(
                     push_type_ref_edges(result, file, type_node, &node_id, module_path, type_name);
                 }
                 if let Some(value) = node.child_by_field_name("value") {
-                    walk_node(value, source, file, module_path, Some(&node_id), result);
+                    if value.kind() == "struct_expression" {
+                        push_struct_expression_edge(
+                            result,
+                            file,
+                            value,
+                            module_path,
+                            Some(&node_id),
+                            source,
+                        );
+                    } else {
+                        walk_children(value, source, file, module_path, Some(&node_id), result);
+                    }
                 }
             }
         }
@@ -427,7 +438,18 @@ fn walk_node(
             if let Some(value) = node.child_by_field_name("value")
                 && let Some(source_id) = parent_id
             {
-                walk_node(value, source, file, module_path, Some(source_id), result);
+                if value.kind() == "struct_expression" {
+                    push_struct_expression_edge(
+                        result,
+                        file,
+                        value,
+                        module_path,
+                        Some(source_id),
+                        source,
+                    );
+                } else {
+                    walk_children(value, source, file, module_path, Some(source_id), result);
+                }
             }
         }
         "type_item" => {
@@ -779,7 +801,10 @@ fn walk_node(
                     repo: None,
                 });
             }
-            walk_children(node, source, file, module_path, parent_id, result);
+            // The nominal construction edge is sufficient for this node. Its
+            // field expressions are visited by the surrounding body walk;
+            // recursing from the struct-expression node itself can revisit
+            // grammar wrapper nodes indefinitely on deeply nested Rust ASTs.
         }
         _ => {
             // For any other node kind, just walk its children
@@ -805,8 +830,17 @@ fn parse_rust_import_path_and_symbols(raw: &str) -> (String, Vec<String>) {
     if let Some((path, imported)) = path.rsplit_once(" as ") {
         let path = path.trim();
         let imported = imported.trim();
+        // `_` is an intentional discard binding, not a usable local alias.
+        // Preserve the legacy raw import identity so merge cannot mistake the
+        // discarded name for a canonical graph symbol.
+        if imported == "_" {
+            return (raw.to_string(), vec![]);
+        }
         let original = path.rsplit("::").next().unwrap_or(path);
-        return (path.to_string(), vec![format!("{original} as {imported}")]);
+        // Keep the raw path for the import node's stable identity; the
+        // structured symbol binding carries the canonical origin used by
+        // merge resolution.
+        return (raw.to_string(), vec![format!("{original} as {imported}")]);
     }
     (path.to_string(), vec![])
 }
@@ -912,6 +946,40 @@ fn first_macro_type_argument(token_tree: tree_sitter::Node, source: &[u8]) -> Op
         }
     }
     None
+}
+
+fn push_struct_expression_edge(
+    result: &mut ExtractionResult,
+    file: &str,
+    node: tree_sitter::Node,
+    module_path: &[String],
+    parent_id: Option<&str>,
+    source: &[u8],
+) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let Ok(raw_name) = name_node.utf8_text(source) else {
+        return;
+    };
+    let Some(type_name) = primary_symbol_path(raw_name) else {
+        return;
+    };
+    let source_id = parent_id
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("file:{file}"));
+    result.edges.push(Edge {
+        source: source_id.clone(),
+        target: qualify_reference_target(file, module_path, &type_name),
+        kind: EdgeKind::Instantiates,
+        confidence: 0.85,
+        direction: None,
+        operation: None,
+        condition: None,
+        async_boundary: None,
+        provenance: edge_provenance(file, name_node, &source_id),
+        repo: None,
+    });
 }
 
 /// Walk all named children of a node.
@@ -2619,7 +2687,7 @@ mod tests {
     fn parses_single_aliased_import_for_cross_file_binding() {
         let result = extract("use types::Options as ResumeOptions;");
         assert_eq!(result.imports.len(), 1);
-        assert_eq!(result.imports[0].path, "types::Options");
+        assert_eq!(result.imports[0].path, "types::Options as ResumeOptions");
         assert_eq!(result.imports[0].symbols, vec!["Options as ResumeOptions"]);
     }
 

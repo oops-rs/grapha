@@ -469,122 +469,132 @@ pub fn run_pipeline(
     let t_max_single_file_ns = AtomicU64::new(0);
     let extraction_cache_entries = Mutex::new(std::collections::HashMap::new());
 
-    let mut results: Vec<_> = indexed_files
-        .par_iter()
-        .filter_map(|input| {
-            let file = &input.path;
-            let t_file_start = Instant::now();
-            let t_fc = Instant::now();
-            let file_context = grapha_core::file_context(&input.context, &module_map, file);
-            t_file_context_ns.fetch_add(t_fc.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            let cache_key = extraction_cache_key(&input.repo_name, &file_context.relative_path);
-            if let Some(existing_cache) = existing_extraction_cache
-                && let Some(entry) = existing_cache.get(&cache_key)
-                && entry.module_name.as_deref() == file_context.module_name.as_deref()
-                && entry.config_fingerprint == config_fingerprint
-                && cache::FileStamp::from_path(file).is_some_and(|stamp| stamp == entry.stamp)
-            {
-                reused_cached.fetch_add(1, Ordering::Relaxed);
-                if let Some(ref pb) = pb {
-                    pb.inc(1);
-                }
-                extraction_cache_entries
-                    .lock()
-                    .expect("extraction cache mutex poisoned")
-                    .insert(cache_key, entry.clone());
-                let file_ns = t_file_start.elapsed().as_nanos() as u64;
-                t_total_per_file_ns.fetch_add(file_ns, Ordering::Relaxed);
-                t_max_single_file_ns.fetch_max(file_ns, Ordering::Relaxed);
-                return Some(entry.result.clone());
-            }
-
-            let t0 = Instant::now();
-            let source = match std::fs::read(file) {
-                Ok(s) => s,
-                Err(_) => {
-                    skipped.fetch_add(1, Ordering::Relaxed);
+    // Rust source can contain deeply nested macro/generic syntax. Rayon’s
+    // default worker stack is small enough for ordinary files but can overflow
+    // while extracting real application crates (Nous's nousd is one example).
+    // Keep parallel extraction while giving parser/tree-walk recursion a bounded
+    // 8 MiB worker stack.
+    let extraction_pool = rayon::ThreadPoolBuilder::new()
+        .stack_size(8 * 1024 * 1024)
+        .build()?;
+    let mut results: Vec<_> = extraction_pool.install(|| {
+        indexed_files
+            .par_iter()
+            .filter_map(|input| {
+                let file = &input.path;
+                let t_file_start = Instant::now();
+                let t_fc = Instant::now();
+                let file_context = grapha_core::file_context(&input.context, &module_map, file);
+                t_file_context_ns.fetch_add(t_fc.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                let cache_key = extraction_cache_key(&input.repo_name, &file_context.relative_path);
+                if let Some(existing_cache) = existing_extraction_cache
+                    && let Some(entry) = existing_cache.get(&cache_key)
+                    && entry.module_name.as_deref() == file_context.module_name.as_deref()
+                    && entry.config_fingerprint == config_fingerprint
+                    && cache::FileStamp::from_path(file).is_some_and(|stamp| stamp == entry.stamp)
+                {
+                    reused_cached.fetch_add(1, Ordering::Relaxed);
                     if let Some(ref pb) = pb {
                         pb.inc(1);
                     }
+                    extraction_cache_entries
+                        .lock()
+                        .expect("extraction cache mutex poisoned")
+                        .insert(cache_key, entry.clone());
                     let file_ns = t_file_start.elapsed().as_nanos() as u64;
                     t_total_per_file_ns.fetch_add(file_ns, Ordering::Relaxed);
                     t_max_single_file_ns.fetch_max(file_ns, Ordering::Relaxed);
-                    return None;
+                    return Some(entry.result.clone());
                 }
-            };
-            t_read_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-            let t1 = Instant::now();
-            let semantic_result =
-                grapha_core::extract_semantics_with_registry(&registry, &source, &file_context);
-            t_extract_ns.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                let t0 = Instant::now();
+                let source = match std::fs::read(file) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        skipped.fetch_add(1, Ordering::Relaxed);
+                        if let Some(ref pb) = pb {
+                            pb.inc(1);
+                        }
+                        let file_ns = t_file_start.elapsed().as_nanos() as u64;
+                        t_total_per_file_ns.fetch_add(file_ns, Ordering::Relaxed);
+                        t_max_single_file_ns.fetch_max(file_ns, Ordering::Relaxed);
+                        return None;
+                    }
+                };
+                t_read_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-            if let Some(ref pb) = pb {
-                pb.inc(1);
-            }
+                let t1 = Instant::now();
+                let semantic_result =
+                    grapha_core::extract_semantics_with_registry(&registry, &source, &file_context);
+                t_extract_ns.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-            match semantic_result {
-                Ok(mut document) => {
-                    extracted.fetch_add(1, Ordering::Relaxed);
-                    apply_config_classifier_semantics(&mut document, &cfg.classifiers);
-                    let mut result = stamp_repo(
-                        grapha_core::lower_semantics(document),
-                        &input.repo_name,
-                        input.repo_name != primary_repo,
-                        &EvidenceMetadata::local_precise(),
-                    );
-                    let t2 = Instant::now();
-                    if result
-                        .nodes
-                        .iter()
-                        .any(|n| snippet::should_extract_snippet(n.kind))
-                    {
-                        let source_str: std::borrow::Cow<'_, str> =
-                            match std::str::from_utf8(&source) {
-                                Ok(s) => std::borrow::Cow::Borrowed(s),
-                                Err(_) => String::from_utf8_lossy(&source),
-                            };
-                        let line_idx = snippet::LineIndex::new(&source_str);
-                        for node in &mut result.nodes {
-                            if snippet::should_extract_snippet(node.kind) {
-                                node.snippet = line_idx
-                                    .extract_symbol_snippet(&node.span, &node.name, node.kind);
+                if let Some(ref pb) = pb {
+                    pb.inc(1);
+                }
+
+                match semantic_result {
+                    Ok(mut document) => {
+                        extracted.fetch_add(1, Ordering::Relaxed);
+                        apply_config_classifier_semantics(&mut document, &cfg.classifiers);
+                        let mut result = stamp_repo(
+                            grapha_core::lower_semantics(document),
+                            &input.repo_name,
+                            input.repo_name != primary_repo,
+                            &EvidenceMetadata::local_precise(),
+                        );
+                        let t2 = Instant::now();
+                        if result
+                            .nodes
+                            .iter()
+                            .any(|n| snippet::should_extract_snippet(n.kind))
+                        {
+                            let source_str: std::borrow::Cow<'_, str> =
+                                match std::str::from_utf8(&source) {
+                                    Ok(s) => std::borrow::Cow::Borrowed(s),
+                                    Err(_) => String::from_utf8_lossy(&source),
+                                };
+                            let line_idx = snippet::LineIndex::new(&source_str);
+                            for node in &mut result.nodes {
+                                if snippet::should_extract_snippet(node.kind) {
+                                    node.snippet = line_idx
+                                        .extract_symbol_snippet(&node.span, &node.name, node.kind);
+                                }
                             }
                         }
+                        t_snippet_ns.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        if let Some((key, entry)) = make_extraction_cache_entry(
+                            file,
+                            &input.repo_name,
+                            &file_context,
+                            &config_fingerprint,
+                            &result,
+                        ) {
+                            extraction_cache_entries
+                                .lock()
+                                .expect("extraction cache mutex poisoned")
+                                .insert(key, entry);
+                        }
+                        let file_ns = t_file_start.elapsed().as_nanos() as u64;
+                        t_total_per_file_ns.fetch_add(file_ns, Ordering::Relaxed);
+                        t_max_single_file_ns.fetch_max(file_ns, Ordering::Relaxed);
+                        Some(result)
                     }
-                    t_snippet_ns.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    if let Some((key, entry)) = make_extraction_cache_entry(
-                        file,
-                        &input.repo_name,
-                        &file_context,
-                        &config_fingerprint,
-                        &result,
-                    ) {
-                        extraction_cache_entries
-                            .lock()
-                            .expect("extraction cache mutex poisoned")
-                            .insert(key, entry);
+                    Err(e) => {
+                        skipped.fetch_add(1, Ordering::Relaxed);
+                        if verbose && let Some(ref pb) = pb {
+                            pb.suspend(|| {
+                                eprintln!("  \x1b[33m!\x1b[0m skipping {}: {e}", file.display())
+                            });
+                        }
+                        let file_ns = t_file_start.elapsed().as_nanos() as u64;
+                        t_total_per_file_ns.fetch_add(file_ns, Ordering::Relaxed);
+                        t_max_single_file_ns.fetch_max(file_ns, Ordering::Relaxed);
+                        None
                     }
-                    let file_ns = t_file_start.elapsed().as_nanos() as u64;
-                    t_total_per_file_ns.fetch_add(file_ns, Ordering::Relaxed);
-                    t_max_single_file_ns.fetch_max(file_ns, Ordering::Relaxed);
-                    Some(result)
                 }
-                Err(e) => {
-                    skipped.fetch_add(1, Ordering::Relaxed);
-                    if verbose && let Some(ref pb) = pb {
-                        pb.suspend(|| {
-                            eprintln!("  \x1b[33m!\x1b[0m skipping {}: {e}", file.display())
-                        });
-                    }
-                    let file_ns = t_file_start.elapsed().as_nanos() as u64;
-                    t_total_per_file_ns.fetch_add(file_ns, Ordering::Relaxed);
-                    t_max_single_file_ns.fetch_max(file_ns, Ordering::Relaxed);
-                    None
-                }
-            }
-        })
-        .collect();
+            })
+            .collect()
+    });
     results.extend(external_seed_results);
 
     grapha_core::finish_plugins(&registry, &project_context)?;
