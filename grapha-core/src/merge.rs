@@ -313,6 +313,43 @@ fn symbol_binding_name(symbol: &str) -> Option<String> {
     (!bound.is_empty()).then(|| bound.to_string())
 }
 
+/// Build, per source file, the canonical declaration name for aliased imports.
+/// `use types::Options as ResumeOptions` binds the local name `ResumeOptions`
+/// to the graph definition named `Options`.
+fn build_imported_symbol_origins(
+    results: &[ExtractionResult],
+) -> HashMap<String, HashMap<String, HashSet<String>>> {
+    let mut per_file = HashMap::new();
+    for result in results {
+        let Some(first_node) = result.nodes.first() else {
+            continue;
+        };
+        let file_entry = per_file
+            .entry(first_node.file.to_string_lossy().to_string())
+            .or_insert_with(HashMap::<String, HashSet<String>>::new);
+        for import in &result.imports {
+            for symbol in &import.symbols {
+                let trimmed = symbol.trim();
+                if trimmed.is_empty() || trimmed == "*" || trimmed == "self" {
+                    continue;
+                }
+                let (origin, binding) = trimmed
+                    .split_once(" as ")
+                    .map_or((trimmed, trimmed), |(origin, binding)| (origin, binding));
+                let origin = origin.rsplit("::").next().unwrap_or(origin).trim();
+                let binding = binding.rsplit("::").next().unwrap_or(binding).trim();
+                if !origin.is_empty() && !binding.is_empty() {
+                    file_entry
+                        .entry(binding.to_string())
+                        .or_default()
+                        .insert(origin.to_string());
+                }
+            }
+        }
+    }
+    per_file
+}
+
 /// Index canonical type/function definitions by (normalized module, name).
 fn build_module_symbol_index<'a>(
     nodes: impl Iterator<Item = (&'a str, NodeKind, Option<&'a str>, &'a str)>,
@@ -334,6 +371,7 @@ fn build_module_symbol_index<'a>(
 struct ImportBindContext<'a> {
     source_file: &'a str,
     imported_symbol_modules: &'a HashMap<String, HashMap<String, HashSet<String>>>,
+    imported_symbol_origins: &'a HashMap<String, HashMap<String, HashSet<String>>>,
     module_symbol_index: &'a HashMap<(String, String), Vec<String>>,
     name_to_entries: &'a HashMap<&'a str, Vec<NameEntry>>,
     candidate_to_owner_names: &'a HashMap<String, Vec<String>>,
@@ -366,18 +404,51 @@ fn resolve_via_imports(
         .collect();
     let (type_name, member) = split_type_and_member(&meaningful, leading, file_imports)?;
 
+    let canonical_type_name = ctx
+        .imported_symbol_origins
+        .get(ctx.source_file)
+        .and_then(|origins| origins.get(type_name))
+        .filter(|origins| origins.len() == 1)
+        .and_then(|origins| origins.iter().next())
+        .map(String::as_str)
+        .unwrap_or(type_name);
+
     let type_id = ctx
         .module_symbol_index
-        .get(&(module_key.clone(), type_name.to_string()))
-        .and_then(|ids| single(ids))
-        .cloned();
+        .get(&(module_key.clone(), canonical_type_name.to_string()))
+        .and_then(|ids| {
+            let eligible: Vec<&String> = ids
+                .iter()
+                .filter(|id| {
+                    ctx.id_to_kind
+                        .get(id.as_str())
+                        .is_some_and(|candidate_kind| match kind {
+                            EdgeKind::TypeRef => matches!(
+                                *candidate_kind,
+                                NodeKind::Struct
+                                    | NodeKind::Enum
+                                    | NodeKind::Trait
+                                    | NodeKind::Protocol
+                                    | NodeKind::TypeAlias
+                                    | NodeKind::Class
+                            ),
+                            EdgeKind::Instantiates => matches!(
+                                *candidate_kind,
+                                NodeKind::Struct | NodeKind::Enum | NodeKind::Class
+                            ),
+                            _ => is_canonical_definition_kind(*candidate_kind),
+                        })
+                })
+                .collect();
+            single(&eligible).map(|id| (*id).clone())
+        });
 
     match (kind, member) {
         (EdgeKind::Calls, Some(method)) => {
             // `Type::method` — bind to the method, never the type (a type node
             // is the wrong target for a call). Refuse if the method (e.g. an
             // external/std associated fn) can't be pinned.
-            resolve_member(method, type_name, &module_key, ctx)
+            resolve_member(method, canonical_type_name, &module_key, ctx)
         }
         (EdgeKind::Calls, None) => {
             // Bare imported function call (`func()` where `use a::func`).
@@ -876,6 +947,7 @@ pub fn merge_with_report(results: Vec<ExtractionResult>) -> MergeOutcome {
 
     // Cross-boundary resolution indexes: per-file imports + canonical defs.
     let imported_symbol_modules = build_imported_symbol_modules(&results);
+    let imported_symbol_origins = build_imported_symbol_origins(&results);
     let module_symbol_index = build_module_symbol_index(graph.nodes.iter().map(|node| {
         (
             node.id.as_str(),
@@ -945,6 +1017,7 @@ pub fn merge_with_report(results: Vec<ExtractionResult>) -> MergeOutcome {
             let bind_ctx = ImportBindContext {
                 source_file,
                 imported_symbol_modules: &imported_symbol_modules,
+                imported_symbol_origins: &imported_symbol_origins,
                 module_symbol_index: &module_symbol_index,
                 name_to_entries: &name_to_entries,
                 candidate_to_owner_names: &candidate_to_owner_names,
@@ -962,10 +1035,14 @@ pub fn merge_with_report(results: Vec<ExtractionResult>) -> MergeOutcome {
 
         // Cross-boundary calls / type refs: when the target can't be resolved
         // by same-name local resolution, try import-guided binding first.
-        if matches!(edge.kind, EdgeKind::Calls | EdgeKind::TypeRef) {
+        if matches!(
+            edge.kind,
+            EdgeKind::Calls | EdgeKind::TypeRef | EdgeKind::Instantiates
+        ) {
             let bind_ctx = ImportBindContext {
                 source_file,
                 imported_symbol_modules: &imported_symbol_modules,
+                imported_symbol_origins: &imported_symbol_origins,
                 module_symbol_index: &module_symbol_index,
                 name_to_entries: &name_to_entries,
                 candidate_to_owner_names: &candidate_to_owner_names,
@@ -1897,6 +1974,101 @@ mod tests {
             .expect("type ref should survive");
         assert_eq!(type_ref.target, "lib_a/src/lib.rs::Thing");
         assert!((type_ref.confidence - IMPORT_BOUND_CONFIDENCE).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cross_crate_instantiates_resolves_to_imported_nominal_type() {
+        let imported = node_in(
+            "types/src/options.rs::Options",
+            "Options",
+            NodeKind::Struct,
+            "types",
+            "types/src/options.rs",
+        );
+        let decoy = node_in(
+            "types/src/options.rs::OptionsFn",
+            "Options",
+            NodeKind::Function,
+            "types",
+            "types/src/options.rs",
+        );
+        let caller = node_in(
+            "consumer/src/main.rs::run",
+            "run",
+            NodeKind::Function,
+            "consumer",
+            "consumer/src/main.rs",
+        );
+
+        let graph = merge(vec![
+            ExtractionResult {
+                nodes: vec![imported, decoy],
+                edges: vec![],
+                imports: vec![],
+            },
+            ExtractionResult {
+                nodes: vec![caller],
+                edges: vec![edge_of(
+                    "consumer/src/main.rs::run",
+                    "consumer/src/main.rs::Options",
+                    EdgeKind::Instantiates,
+                )],
+                imports: vec![named_import("types", &["Options"])],
+            },
+        ]);
+
+        let instantiate = graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::Instantiates)
+            .expect("constructor edge should resolve");
+        assert_eq!(instantiate.target, "types/src/options.rs::Options");
+        assert!((instantiate.confidence - IMPORT_BOUND_CONFIDENCE).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aliased_cross_crate_instantiates_uses_original_definition_name() {
+        let imported = node_in(
+            "types/src/options.rs::Options",
+            "Options",
+            NodeKind::Struct,
+            "types",
+            "types/src/options.rs",
+        );
+        let caller = node_in(
+            "consumer/src/main.rs::run",
+            "run",
+            NodeKind::Function,
+            "consumer",
+            "consumer/src/main.rs",
+        );
+
+        let graph = merge(vec![
+            ExtractionResult {
+                nodes: vec![imported],
+                edges: vec![],
+                imports: vec![],
+            },
+            ExtractionResult {
+                nodes: vec![caller],
+                edges: vec![edge_of(
+                    "consumer/src/main.rs::run",
+                    "consumer/src/main.rs::ResumeOptions",
+                    EdgeKind::Instantiates,
+                )],
+                imports: vec![named_import(
+                    "types::Options",
+                    &["Options as ResumeOptions"],
+                )],
+            },
+        ]);
+
+        let instantiate = graph
+            .edges
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::Instantiates)
+            .expect("aliased constructor edge should resolve");
+        assert_eq!(instantiate.target, "types/src/options.rs::Options");
     }
 
     #[test]
