@@ -11,6 +11,7 @@ use crate::recall::{self, Recall};
 use crate::search;
 use crate::store::Store;
 use crate::{annotations, assets, cluster, concepts, localization};
+use grapha_engine::index_status::IndexFreshness;
 
 pub struct McpState {
     pub graph: Graph,
@@ -23,6 +24,8 @@ pub struct McpState {
     /// dispatching. Set when the MCP server is started against a project
     /// that has no `.grapha` directory.
     pub needs_index: bool,
+    /// Freshness snapshot captured with the currently loaded graph.
+    pub freshness: Option<IndexFreshness>,
 }
 
 /// Build (or rebuild) the on-disk index artifacts for `project_root`,
@@ -87,6 +90,18 @@ pub(crate) fn ensure_indexed(state: &mut McpState) -> Result<(), Value> {
             state.graph = graph;
             state.search_index = search_index;
             state.store_path = state.project_root.join(".grapha");
+            let freshness = match crate::index_status::capture_index_freshness(
+                &state.project_root,
+                &state.store_path,
+            ) {
+                Ok(freshness) => freshness,
+                Err(error) => {
+                    return Err(tool_error(format!(
+                        "failed to capture index freshness: {error}"
+                    )));
+                }
+            };
+            state.freshness = Some(freshness);
             let valid_ids: std::collections::HashSet<&str> =
                 state.graph.nodes.iter().map(|n| n.id.as_str()).collect();
             state.recall.prune(&valid_ids);
@@ -766,6 +781,84 @@ fn serialize_result_with_fields<T: serde::Serialize>(
     }
 }
 
+fn is_read_only_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "search_symbols"
+            | "get_index_status"
+            | "get_symbol_context"
+            | "get_impact"
+            | "get_file_map"
+            | "trace"
+            | "get_file_symbols"
+            | "batch_file_symbols"
+            | "batch_context"
+            | "analyze_complexity"
+            | "get_api_surface"
+            | "find_usages"
+            | "detect_smells"
+            | "get_module_summary"
+            | "search_concepts"
+            | "get_concept"
+    )
+}
+
+fn freshness_evidence(state: &McpState) -> Value {
+    let (freshness_state, status, mut limitations) = match state.freshness.as_ref() {
+        Some(freshness) => match freshness.status() {
+            Ok(status) if freshness.matches_graph(&state.graph) => {
+                let state_name = if status.may_be_stale {
+                    "stale"
+                } else if status.freshness_tracking_available {
+                    "current"
+                } else {
+                    "untracked"
+                };
+                (state_name, Some(status), Vec::new())
+            }
+            Ok(status) => (
+                "unknown",
+                Some(status),
+                vec!["index status does not match the graph loaded in memory".to_string()],
+            ),
+            Err(error) => (
+                "unknown",
+                None,
+                vec![format!("freshness status unavailable: {error}")],
+            ),
+        },
+        None => (
+            "unknown",
+            None,
+            vec!["freshness snapshot unavailable".to_string()],
+        ),
+    };
+    limitations.extend([
+        "usage counts are resolved matches in the loaded index; zero does not prove the symbol is unused".to_string(),
+        "unsupported syntax and unresolved or intentionally dropped edges are not counted".to_string(),
+    ]);
+    json!({
+        "result_scope": "resolved_index_matches",
+        "freshness": freshness_state,
+        "status": status,
+        "limitations": limitations,
+    })
+}
+
+fn attach_freshness_evidence(state: &McpState, mut result: Value) -> Value {
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        return result;
+    }
+    let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) else {
+        return result;
+    };
+    let evidence = freshness_evidence(state);
+    if let Ok(text) = serde_json::to_string(&evidence) {
+        content.push(json!({ "type": "text", "text": text }));
+    }
+    result
+}
+
 fn project_symbol_fields(value: &mut Value, fields: FieldSet) {
     match value {
         Value::Object(object) => {
@@ -877,7 +970,7 @@ pub fn handle_tool_call(state: &mut McpState, tool_name: &str, arguments: &Value
         return error_value;
     }
 
-    match tool_name {
+    let result = match tool_name {
         "search_symbols" => handle_search_symbols(state, arguments),
         "get_index_status" => handle_get_index_status(state),
         "get_symbol_context" => handle_get_symbol_context(state, arguments),
@@ -900,6 +993,11 @@ pub fn handle_tool_call(state: &mut McpState, tool_name: &str, arguments: &Value
         "remove_concept" => handle_remove_concept(state, arguments),
         "reload" => handle_reload(state),
         _ => tool_error(format!("unknown tool: {tool_name}")),
+    };
+    if is_read_only_tool(tool_name) {
+        attach_freshness_evidence(state, result)
+    } else {
+        result
     }
 }
 
@@ -1030,9 +1128,12 @@ fn handle_search_symbols(state: &McpState, arguments: &Value) -> Value {
 }
 
 fn handle_get_index_status(state: &McpState) -> Value {
-    match crate::index_status::load_index_status(&state.project_root, &state.store_path) {
-        Ok(status) => serialize_result(&status),
-        Err(error) => tool_error(format!("failed to load index status: {error}")),
+    match state.freshness.as_ref() {
+        Some(freshness) => match freshness.status() {
+            Ok(status) => serialize_result(&status),
+            Err(error) => tool_error(format!("failed to load index status: {error}")),
+        },
+        None => tool_error("index freshness snapshot unavailable".to_string()),
     }
 }
 
@@ -1630,8 +1731,17 @@ fn handle_reload(state: &mut McpState) -> Value {
     let node_count = graph.nodes.len();
     let edge_count = graph.edges.len();
 
+    let freshness = match crate::index_status::capture_index_freshness(
+        &state.project_root,
+        &state.store_path,
+    ) {
+        Ok(freshness) => freshness,
+        Err(error) => return tool_error(format!("failed to capture index freshness: {error}")),
+    };
+
     state.graph = graph;
     state.search_index = search_index;
+    state.freshness = Some(freshness);
 
     // Prune recall entries that reference nodes no longer in the graph
     let valid_ids: std::collections::HashSet<&str> =
@@ -1743,6 +1853,7 @@ mod tests {
             store_path: project_root.join(".grapha"),
             recall: Recall::new(),
             needs_index: true,
+            freshness: None,
         };
 
         // No .grapha directory yet.
@@ -1794,6 +1905,7 @@ mod tests {
             store_path: bogus_path.join(".grapha"),
             recall: Recall::new(),
             needs_index: true,
+            freshness: None,
         };
 
         let result = handle_tool_call(&mut state, "get_file_map", &json!({}));
@@ -1983,6 +2095,32 @@ mod tests {
     }
 
     #[test]
+    fn read_only_results_append_evidence_after_unchanged_primary_payload() {
+        let mut state = make_test_state_with_symbol_usages();
+        let result = handle_tool_call(
+            &mut state,
+            "find_usages",
+            &json!({"symbol": "GameManager", "exclude_files": ["Generated/"]}),
+        );
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        let primary = serde_json::from_str::<Value>(content[0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(primary["total_usages"], 2);
+        let evidence = serde_json::from_str::<Value>(content[1]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(evidence["result_scope"], "resolved_index_matches");
+        assert!(
+            evidence["limitations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| {
+                    item.as_str()
+                        .is_some_and(|text| text.contains("zero does not prove"))
+                })
+        );
+    }
+
+    #[test]
     fn detect_smells_on_empty_graph() {
         let mut state = make_test_state();
         let result = handle_tool_call(&mut state, "detect_smells", &json!({}));
@@ -2059,6 +2197,7 @@ mod tests {
             store_path: PathBuf::from("/tmp/test"),
             recall: Recall::new(),
             needs_index: false,
+            freshness: None,
         }
     }
 
@@ -2120,6 +2259,7 @@ mod tests {
             store_path: PathBuf::from("/tmp/test"),
             recall: Recall::new(),
             needs_index: false,
+            freshness: None,
         }
     }
 
@@ -2173,6 +2313,7 @@ mod tests {
             store_path: PathBuf::from("/tmp/test"),
             recall: Recall::new(),
             needs_index: false,
+            freshness: None,
         }
     }
 
@@ -2248,6 +2389,7 @@ mod tests {
             store_path: PathBuf::from("/tmp/test"),
             recall: Recall::new(),
             needs_index: false,
+            freshness: None,
         }
     }
 
@@ -2448,6 +2590,7 @@ mod tests {
             store_path: PathBuf::from("/tmp/test"),
             recall: Recall::new(),
             needs_index: false,
+            freshness: None,
         }
     }
 }

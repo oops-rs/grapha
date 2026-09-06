@@ -241,6 +241,59 @@ where
     print_query_result(&result, format, render_options, tree_renderer)
 }
 
+fn symbol_usage_output(
+    graph: &grapha_core::graph::Graph,
+    result: &query::symbol_usages::SymbolUsagesResult,
+    freshness: Option<&crate::index_status::IndexFreshness>,
+) -> serde_json::Value {
+    let mut limitations = Vec::new();
+    let status = match freshness {
+        Some(freshness) if freshness.matches_graph(graph) => match freshness.status() {
+            Ok(status) => Some(status),
+            Err(error) => {
+                limitations.push(format!("freshness status unavailable: {error}"));
+                None
+            }
+        },
+        Some(_) => {
+            limitations.push("index status does not match the graph loaded in memory".to_string());
+            None
+        }
+        None => {
+            limitations
+                .push("freshness snapshot unavailable or changed while loading graph".to_string());
+            None
+        }
+    };
+    limitations.extend([
+        "usage counts are resolved matches in the loaded index; zero does not prove the symbol is unused".to_string(),
+        "unsupported syntax and unresolved or intentionally dropped edges are not counted".to_string(),
+    ]);
+    let mut output = serde_json::to_value(result).expect("symbol usages are serializable");
+    let freshness_label = if limitations.iter().any(|item| {
+        item == "index status does not match the graph loaded in memory"
+            || item.starts_with("freshness status unavailable:")
+    }) {
+        "unknown"
+    } else if status.as_ref().is_some_and(|status| status.may_be_stale) {
+        "stale"
+    } else if status
+        .as_ref()
+        .is_some_and(|status| status.freshness_tracking_available)
+    {
+        "current"
+    } else {
+        "untracked"
+    };
+    output["evidence"] = serde_json::json!({
+        "result_scope": "resolved_index_matches",
+        "freshness": freshness_label,
+        "status": status,
+        "limitations": limitations,
+    });
+    output
+}
+
 pub(crate) fn handle_symbol_command(
     command: SymbolCommands,
     render_options: render::RenderOptions,
@@ -483,7 +536,19 @@ pub(crate) fn handle_symbol_command(
             limit,
             path,
         } => {
+            let freshness_before =
+                crate::index_status::capture_index_freshness(&path, &path.join(".grapha")).ok();
             let graph = load_graph(&path)?;
+            let freshness_after =
+                crate::index_status::capture_index_freshness(&path, &path.join(".grapha")).ok();
+            let freshness = match (freshness_before, freshness_after) {
+                (Some(before), Some(after))
+                    if before.snapshot_identity() == after.snapshot_identity() =>
+                {
+                    Some(after)
+                }
+                _ => None,
+            };
             let result = resolve_query_result(
                 query::symbol_usages::query_symbol_usages(
                     &graph,
@@ -495,7 +560,8 @@ pub(crate) fn handle_symbol_command(
                 ),
                 "symbol",
             )?;
-            print_json(&result)
+            let output = symbol_usage_output(&graph, &result, freshness.as_ref());
+            print_json(&output)
         }
         SymbolCommands::File {
             file,

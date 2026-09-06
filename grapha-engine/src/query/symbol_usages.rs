@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use grapha_core::graph::{Edge, EdgeKind, Graph, Node, NodeKind};
+use grapha_core::graph::{Edge, EdgeKind, EdgeProvenance, Graph, Node, NodeKind};
 use serde::Serialize;
 
 use crate::symbol_locator::SymbolLocatorIndex;
@@ -36,6 +36,8 @@ pub struct UsageSite {
     pub source: SymbolRef,
     pub edge_kind: EdgeKind,
     pub confidence: f64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<EdgeProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
 }
@@ -133,6 +135,7 @@ pub fn query_symbol_usages(
                 source: to_symbol_ref(source, &locators),
                 edge_kind: edge.kind,
                 confidence: edge.confidence,
+                provenance: edge.provenance.clone(),
                 operation: edge.operation.clone(),
             });
     }

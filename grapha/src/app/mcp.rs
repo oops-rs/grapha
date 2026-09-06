@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use anyhow::Context;
+
 use crate::store::Store;
 use crate::{index_status, mcp, recall, search, store, watch};
 
@@ -68,8 +70,14 @@ fn build_initial_state(
         );
     }
 
+    let freshness_before = index_status::capture_index_freshness(path, store_path)
+        .context("failed to capture index freshness")?;
     let graph = load_graph(path)?;
     let search_index = open_search_index(path, verbose)?;
+    let freshness_after = index_status::capture_index_freshness(path, store_path)
+        .context("failed to capture index freshness")?;
+    let freshness = (freshness_before.snapshot_identity() == freshness_after.snapshot_identity())
+        .then_some(freshness_after);
     Ok(mcp::handler::McpState {
         graph,
         search_index,
@@ -77,6 +85,7 @@ fn build_initial_state(
         store_path: store_path.to_path_buf(),
         recall: recall::Recall::new(),
         needs_index: false,
+        freshness,
     })
 }
 
@@ -97,6 +106,7 @@ fn empty_state_for_lazy_index(
         store_path,
         recall: recall::Recall::new(),
         needs_index: true,
+        freshness: None,
     }
 }
 
@@ -110,8 +120,11 @@ fn run_mcp_with_watch(
     let store_path = path.join(".grapha");
     let project_path = path.clone();
 
-    let (state_tx, state_rx) =
-        std::sync::mpsc::channel::<(grapha_core::graph::Graph, tantivy::Index)>();
+    let (state_tx, state_rx) = std::sync::mpsc::channel::<(
+        grapha_core::graph::Graph,
+        tantivy::Index,
+        grapha_engine::index_status::IndexFreshness,
+    )>();
 
     std::thread::Builder::new()
         .name("grapha-watch-reindex".into())
@@ -156,7 +169,17 @@ fn run_mcp_with_watch(
                                             eprintln!("watch: failed to save index status: {e}");
                                             continue;
                                         }
-                                        if state_tx.send((graph, index)).is_err() {
+                                        let Some(freshness) =
+                                            index_status::capture_index_freshness(
+                                                &project_path,
+                                                &store_path,
+                                            )
+                                            .ok()
+                                        else {
+                                            eprintln!("watch: failed to capture index freshness");
+                                            continue;
+                                        };
+                                        if state_tx.send((graph, index, freshness)).is_err() {
                                             break;
                                         }
                                         if verbose {

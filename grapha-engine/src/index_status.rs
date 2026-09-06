@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::cache::{self, FileStamp};
 use crate::config::GraphaConfig;
 use crate::{assets, localization};
+use grapha_core::graph::Graph;
 
 const INDEX_STATUS_FILENAME: &str = "index_status.json";
 const INDEX_STATUS_VERSION: u32 = 1;
@@ -105,6 +106,61 @@ pub struct BorrowedIndexStatus {
     pub project_root: String,
     pub store_dir: String,
     pub migrated_at_unix_secs: u64,
+}
+
+/// A read-only handle to the exact index-status snapshot associated with a
+/// loaded graph. The status is recomputed against this immutable snapshot on
+/// each read, so later source edits are visible without accidentally loading a
+/// newer status file for an older in-memory graph.
+#[derive(Debug, Clone)]
+pub struct IndexFreshness {
+    project_root: PathBuf,
+    store_dir: PathBuf,
+    snapshot: Option<IndexStatusSnapshot>,
+    fallback_status: IndexStatus,
+}
+
+impl IndexFreshness {
+    pub fn status(&self) -> anyhow::Result<IndexStatus> {
+        match self.snapshot.clone() {
+            Some(snapshot) => compute_status(snapshot, &self.project_root, &self.store_dir),
+            None => Ok(self.fallback_status.clone()),
+        }
+    }
+
+    /// Whether the immutable status snapshot describes the graph in memory.
+    /// Legacy stores have no snapshot identity and are conservatively treated
+    /// as unknown rather than as a coherent fresh result.
+    pub fn matches_graph(&self, graph: &Graph) -> bool {
+        self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.node_count == graph.nodes.len() && snapshot.edge_count == graph.edges.len()
+        })
+    }
+
+    pub fn indexed_at_unix_secs(&self) -> u64 {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.indexed_at_unix_secs)
+            .unwrap_or(self.fallback_status.indexed_at_unix_secs)
+    }
+
+    pub fn snapshot_identity(&self) -> (u64, usize, usize, String) {
+        (
+            self.indexed_at_unix_secs(),
+            self.snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.node_count)
+                .unwrap_or(self.fallback_status.node_count),
+            self.snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.edge_count)
+                .unwrap_or(self.fallback_status.edge_count),
+            self.snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.grapha_version.clone())
+                .unwrap_or_else(|| self.fallback_status.grapha_version.clone()),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -821,6 +877,38 @@ pub fn load_index_status(project_root: &Path, store_dir: &Path) -> anyhow::Resul
     }
 }
 
+/// Capture the status snapshot backing a loaded graph. Unlike
+/// [`load_index_status`], subsequent calls to [`IndexFreshness::status`] never
+/// reopen `index_status.json`; they compare live repository state to this
+/// captured snapshot instead.
+pub fn capture_index_freshness(
+    project_root: &Path,
+    store_dir: &Path,
+) -> anyhow::Result<IndexFreshness> {
+    match load_snapshot(store_dir) {
+        Ok(snapshot) => {
+            let fallback_status = compute_status(snapshot.clone(), project_root, store_dir)?;
+            Ok(IndexFreshness {
+                project_root: project_root.to_path_buf(),
+                store_dir: store_dir.to_path_buf(),
+                snapshot: Some(snapshot),
+                fallback_status,
+            })
+        }
+        Err(error) => {
+            if status_path(store_dir).exists() {
+                return Err(error);
+            }
+            Ok(IndexFreshness {
+                project_root: project_root.to_path_buf(),
+                store_dir: store_dir.to_path_buf(),
+                snapshot: None,
+                fallback_status: legacy_status(store_dir)?,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1162,6 +1250,43 @@ mod tests {
                 .changed_files_since_index
                 .contains(&"src.rs".to_string())
         );
+    }
+
+    #[test]
+    fn captured_freshness_recomputes_against_live_files_without_reloading_snapshot() {
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let source = dir.path().join("src.rs");
+        fs::write(&source, "fn main() {}\n").unwrap();
+        commit_all(&repo, "initial").unwrap();
+
+        let store_dir = dir.path().join(".grapha");
+        save_index_status(dir.path(), &store_dir, 1, 0, &GraphaConfig::default()).unwrap();
+        let captured = capture_index_freshness(dir.path(), &store_dir).unwrap();
+        assert!(!captured.status().unwrap().may_be_stale);
+
+        std::thread::sleep(Duration::from_millis(10));
+        fs::write(&source, "fn main() { println!(\"changed\"); }\n").unwrap();
+        let status = captured.status().unwrap();
+        assert!(status.may_be_stale);
+        assert_eq!(status.changed_input_files_since_index, vec!["src.rs"]);
+    }
+
+    #[test]
+    fn captured_freshness_rejects_graph_count_mismatch() {
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("src.rs"), "fn main() {}\n").unwrap();
+        commit_all(&repo, "initial").unwrap();
+        let store_dir = dir.path().join(".grapha");
+        save_index_status(dir.path(), &store_dir, 1, 0, &GraphaConfig::default()).unwrap();
+        let captured = capture_index_freshness(dir.path(), &store_dir).unwrap();
+        let graph = Graph {
+            version: String::new(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        };
+        assert!(!captured.matches_graph(&graph));
     }
 
     #[test]

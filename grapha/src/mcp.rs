@@ -11,7 +11,11 @@ use types::{JsonRpcRequest, JsonRpcResponse};
 /// Run MCP server with a watch channel that hot-swaps the graph on file changes.
 pub fn run_mcp_server_with_watch(
     mut state: McpState,
-    watch_rx: std::sync::mpsc::Receiver<(grapha_core::graph::Graph, tantivy::Index)>,
+    watch_rx: std::sync::mpsc::Receiver<(
+        grapha_core::graph::Graph,
+        tantivy::Index,
+        grapha_engine::index_status::IndexFreshness,
+    )>,
     verbose: bool,
 ) -> anyhow::Result<()> {
     let stdin = io::stdin();
@@ -20,11 +24,12 @@ pub fn run_mcp_server_with_watch(
     // Set stdin to non-blocking-ish: use lines() but poll watch_rx between requests
     for line in stdin.lock().lines() {
         // Check for graph updates from watcher (non-blocking)
-        while let Ok((graph, index)) = watch_rx.try_recv() {
+        while let Ok((graph, index, freshness)) = watch_rx.try_recv() {
             let node_count = graph.nodes.len();
             let edge_count = graph.edges.len();
             state.graph = graph;
             state.search_index = index;
+            state.freshness = Some(freshness);
 
             let valid_ids: std::collections::HashSet<&str> =
                 state.graph.nodes.iter().map(|n| n.id.as_str()).collect();
@@ -180,6 +185,7 @@ mod tests {
             store_path: PathBuf::from("/tmp/test"),
             recall: crate::recall::Recall::new(),
             needs_index: false,
+            freshness: None,
         }
     }
 
