@@ -333,6 +333,21 @@ fn walk_node(
                     );
                 }
 
+                // Function parameter types are nominal references too. The
+                // return-type path above is not sufficient: a function can
+                // consume a type without returning it, and tree-sitter keeps
+                // parameter types under the separate `parameters` node.
+                if let Some(parameters) = node.child_by_field_name("parameters") {
+                    extract_function_parameter_type_refs(
+                        parameters,
+                        source,
+                        file,
+                        module_path,
+                        &node_id,
+                        result,
+                    );
+                }
+
                 // Walk function body for nested items and call expressions
                 if let Some(body) = node.child_by_field_name("body") {
                     walk_children(body, source, file, module_path, Some(&node_id), result);
@@ -367,9 +382,22 @@ fn walk_node(
                 {
                     push_type_ref_edges(result, file, type_node, &node_id, module_path, type_name);
                 }
+                if let Some(value) = node.child_by_field_name("value") {
+                    walk_node(value, source, file, module_path, Some(&node_id), result);
+                }
             }
         }
         "let_declaration" => {
+            // A struct-pattern is a type use, not a variable declaration:
+            // `let SessionResumeOptions { policy } = options;` binds `policy`
+            // while naming `SessionResumeOptions` as the type being matched.
+            // Emit that reference even though `extract_variable` correctly
+            // declines to materialize the pattern as a Variable node.
+            if let Some(pattern) = node.child_by_field_name("pattern")
+                && let Some(source_id) = parent_id
+            {
+                push_pattern_type_ref_edges(result, file, pattern, source_id, module_path, source);
+            }
             if let Some(graph_node) =
                 extract_variable(node, source, file, module_path, parent_id, result)
             {
@@ -395,6 +423,11 @@ fn walk_node(
                 {
                     push_type_ref_edges(result, file, type_node, &node_id, module_path, type_name);
                 }
+            }
+            if let Some(value) = node.child_by_field_name("value")
+                && let Some(source_id) = parent_id
+            {
+                walk_node(value, source, file, module_path, Some(source_id), result);
             }
         }
         "type_item" => {
@@ -667,15 +700,11 @@ fn walk_node(
                     grapha_core::resolve::ImportKind::Named
                 };
 
-                // Extract symbols from grouped imports: use foo::{A, B}
-                let (path, symbols) = if let Some(brace_start) = raw.find('{') {
-                    let base = raw[..brace_start].trim_end_matches("::").to_string();
-                    let inner = raw[brace_start + 1..].trim_end_matches('}').trim();
-                    let syms = inner.split(',').map(|s| s.trim().to_string()).collect();
-                    (base, syms)
-                } else {
-                    (raw.trim_end_matches("::*").to_string(), vec![])
-                };
+                // Extract symbols from grouped imports (`foo::{A, B}`) and
+                // preserve the binding on a single aliased import
+                // (`foo::A as Local`). The merge resolver needs the original
+                // symbol plus its local binding to cross the file boundary.
+                let (path, symbols) = parse_rust_import_path_and_symbols(&raw);
 
                 result.imports.push(grapha_core::resolve::Import {
                     path: path.clone(),
@@ -716,11 +745,70 @@ fn walk_node(
             }
             // No children of a macro token tree are real items, so do not recurse.
         }
+        "struct_pattern" | "tuple_struct_pattern" => {
+            // Patterns outside a `let_declaration` (for example `match` arms)
+            // are still nominal type uses. `let_declaration` handles its own
+            // pattern because this walker intentionally does not recurse into
+            // declaration fields.
+            if let Some(source_id) = parent_id {
+                push_pattern_type_ref_edges(result, file, node, source_id, module_path, source);
+            }
+        }
+        "struct_expression" => {
+            // `Options { tag: 1 }` is a construction site. Preserve the
+            // nominal target as an Instantiates edge so usages can distinguish
+            // construction from a parameter/field TypeRef while sharing the
+            // same import-guided resolver and exact source provenance.
+            if let Some(name_node) = node.child_by_field_name("name")
+                && let Ok(raw_name) = name_node.utf8_text(source)
+                && let Some(type_name) = primary_symbol_path(raw_name)
+            {
+                let source_id = parent_id
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| format!("file:{file}"));
+                result.edges.push(Edge {
+                    source: source_id.clone(),
+                    target: qualify_reference_target(file, module_path, &type_name),
+                    kind: EdgeKind::Instantiates,
+                    confidence: 0.85,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                    provenance: edge_provenance(file, name_node, &source_id),
+                    repo: None,
+                });
+            }
+            walk_children(node, source, file, module_path, parent_id, result);
+        }
         _ => {
             // For any other node kind, just walk its children
             walk_children(node, source, file, module_path, parent_id, result);
         }
     }
+}
+
+fn parse_rust_import_path_and_symbols(raw: &str) -> (String, Vec<String>) {
+    if let Some(brace_start) = raw.find('{') {
+        let base = raw[..brace_start].trim_end_matches("::").to_string();
+        let inner = raw[brace_start + 1..].trim_end_matches('}').trim();
+        let symbols = inner
+            .split(',')
+            .map(str::trim)
+            .filter(|symbol| !symbol.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        return (base, symbols);
+    }
+
+    let path = raw.trim_end_matches("::*").trim();
+    if let Some((path, imported)) = path.rsplit_once(" as ") {
+        let path = path.trim();
+        let imported = imported.trim();
+        let original = path.rsplit("::").next().unwrap_or(path);
+        return (path.to_string(), vec![format!("{original} as {imported}")]);
+    }
+    (path.to_string(), vec![])
 }
 
 /// Synthesize a struct-like type node for a macro that declares a single newtype
@@ -1403,6 +1491,67 @@ fn push_type_ref_edges(
     }
 }
 
+fn extract_function_parameter_type_refs(
+    parameters: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    source_id: &str,
+    result: &mut ExtractionResult,
+) {
+    let mut cursor = parameters.walk();
+    for parameter in parameters.named_children(&mut cursor) {
+        if parameter.kind() != "parameter" {
+            continue;
+        }
+        let Some(type_node) = parameter.child_by_field_name("type") else {
+            continue;
+        };
+        let Ok(type_name) = type_node.utf8_text(source) else {
+            continue;
+        };
+        push_type_ref_edges(result, file, type_node, source_id, module_path, type_name);
+    }
+}
+
+fn push_pattern_type_ref_edges(
+    result: &mut ExtractionResult,
+    file: &str,
+    pattern: tree_sitter::Node,
+    source_id: &str,
+    module_path: &[String],
+    source: &[u8],
+) {
+    match pattern.kind() {
+        "struct_pattern" => {
+            if let Some(type_node) = pattern.child_by_field_name("type")
+                && let Ok(type_name) = type_node.utf8_text(source)
+            {
+                push_type_ref_edges(result, file, type_node, source_id, module_path, type_name);
+            }
+        }
+        "tuple_struct_pattern" => {
+            // `Some(x)`/`Ok(x)`/`Err(x)` are enum constructor patterns, not
+            // nominal type references. Other tuple-struct patterns (e.g.
+            // `Wrapper(value)`) are genuine type uses.
+            if let Some(type_node) = pattern.child_by_field_name("type")
+                && let Ok(type_name) = type_node.utf8_text(source)
+                && !is_std_option_result_constructor(type_name.trim())
+            {
+                push_type_ref_edges(result, file, type_node, source_id, module_path, type_name);
+            }
+        }
+        "tuple_pattern" | "reference_pattern" | "ref_pattern" | "mut_pattern"
+        | "captured_pattern" | "or_pattern" => {
+            let mut cursor = pattern.walk();
+            for child in pattern.named_children(&mut cursor) {
+                push_pattern_type_ref_edges(result, file, child, source_id, module_path, source);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Extract a named symbol (struct, enum, trait, module) into a Node.
 fn extract_named_item(
     node: tree_sitter::Node,
@@ -1553,6 +1702,11 @@ fn extract_variable(
     if name == "_" {
         return None;
     }
+    // A named/tuple-struct pattern introduces bindings for its fields or
+    // arguments; its leading type/constructor identifier is never a variable.
+    if matches!(pattern.kind(), "struct_pattern" | "tuple_struct_pattern") {
+        return None;
+    }
     // `let Some(x) = ..` / `let Ok(v) = ..` destructure into a `tuple_struct_pattern`
     // whose leading identifier is the std constructor, not a real binding. Suppress
     // the phantom node named after the constructor (the inner binding, if any, is a
@@ -1693,6 +1847,8 @@ fn extract_struct_fields(
                 repo: None,
             });
 
+            let field_id = id.clone();
+
             result.nodes.push(Node {
                 id,
                 kind: NodeKind::Field,
@@ -1711,6 +1867,12 @@ fn extract_struct_fields(
                 snippet: None,
                 repo: None,
             });
+
+            if let Some(type_node) = child.child_by_field_name("type")
+                && let Ok(type_name) = type_node.utf8_text(source)
+            {
+                push_type_ref_edges(result, file, type_node, &field_id, module_path, type_name);
+            }
         }
     }
 }
@@ -2156,6 +2318,12 @@ mod tests {
         let name = find_node(&result, "name");
         assert_eq!(name.kind, NodeKind::Field);
         assert_eq!(name.visibility, Visibility::Private);
+        assert!(has_edge(
+            &result,
+            &name.id,
+            "test.rs::String",
+            EdgeKind::TypeRef
+        ));
 
         assert!(has_edge(&result, &config.id, &debug.id, EdgeKind::Contains));
         assert!(has_edge(&result, &config.id, &name.id, EdgeKind::Contains));
@@ -2354,6 +2522,105 @@ mod tests {
             "test.rs::AppError",
             EdgeKind::TypeRef
         ));
+    }
+
+    #[test]
+    fn extracts_parameter_struct_literal_and_destructure_type_usages() {
+        let result = extract(
+            r#"
+            pub struct Options { pub tag: u32 }
+
+            pub fn build() -> Options {
+                Options { tag: 1 }
+            }
+
+            pub fn build_local() -> Options {
+                let options = Options { tag: 1 };
+                options
+            }
+
+            pub fn read(options: Options) -> u32 {
+                let Options { tag } = options;
+                tag
+            }
+            "#,
+        );
+        let build = find_node(&result, "build");
+        let build_local = find_node(&result, "build_local");
+        let read = find_node(&result, "read");
+
+        assert!(has_edge(
+            &result,
+            &build.id,
+            "test.rs::Options",
+            EdgeKind::Instantiates
+        ));
+        assert!(has_edge(
+            &result,
+            &build_local.id,
+            "test.rs::Options",
+            EdgeKind::Instantiates
+        ));
+        assert!(has_edge(
+            &result,
+            &read.id,
+            "test.rs::Options",
+            EdgeKind::TypeRef
+        ));
+        assert_eq!(
+            result
+                .edges
+                .iter()
+                .filter(|edge| {
+                    edge.source == read.id
+                        && edge.target == "test.rs::Options"
+                        && edge.kind == EdgeKind::TypeRef
+                })
+                .count(),
+            2,
+            "read has one parameter and one destructuring type use"
+        );
+        assert!(
+            !result
+                .nodes
+                .iter()
+                .any(|node| node.kind == NodeKind::Variable && node.name == "Options"),
+            "struct-pattern type names must not become variable nodes"
+        );
+    }
+
+    #[test]
+    fn extracts_tuple_struct_type_usage_without_constructor_phantom() {
+        let result = extract(
+            r#"
+            struct Wrapper(u32);
+            fn read(value: Wrapper) {
+                let Wrapper(inner) = value;
+                let Some(item) = Some(inner) else { return; };
+            }
+            "#,
+        );
+        let read = find_node(&result, "read");
+        assert!(has_edge(
+            &result,
+            &read.id,
+            "test.rs::Wrapper",
+            EdgeKind::TypeRef
+        ));
+        assert!(
+            !result.nodes.iter().any(|node| {
+                node.kind == NodeKind::Variable && matches!(node.name.as_str(), "Wrapper" | "Some")
+            }),
+            "tuple-struct and Option constructor names must not become variables"
+        );
+    }
+
+    #[test]
+    fn parses_single_aliased_import_for_cross_file_binding() {
+        let result = extract("use types::Options as ResumeOptions;");
+        assert_eq!(result.imports.len(), 1);
+        assert_eq!(result.imports[0].path, "types::Options");
+        assert_eq!(result.imports[0].symbols, vec!["Options as ResumeOptions"]);
     }
 
     #[test]
