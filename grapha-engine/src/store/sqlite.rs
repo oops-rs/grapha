@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::store::{Store, StoreWriteStats};
-use grapha_core::graph::{EdgeKind, Graph, NodeKind, Visibility};
+use grapha_core::graph::{EdgeKind, Graph, Node, NodeKind, Visibility};
 
 mod compat;
 mod read;
@@ -67,6 +67,12 @@ impl SqliteStore {
 
     pub fn load_read_only(&self) -> anyhow::Result<Graph> {
         read::load_filtered_read_only(self, None, None)
+    }
+
+    /// Read only the nodes named by `ids` (request order, missing ids skipped)
+    /// without loading the rest of the graph.
+    pub fn load_nodes_by_ids_read_only(&self, ids: &[&str]) -> anyhow::Result<Vec<Node>> {
+        read::load_nodes_by_ids_read_only(self, ids)
     }
 }
 
@@ -330,6 +336,46 @@ mod tests {
         assert_eq!(loaded.edges[0].provenance, graph.edges[0].provenance);
         assert_eq!(loaded.nodes[0].repo.as_deref(), Some("app"));
         assert_eq!(loaded.edges[0].repo.as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn nodes_by_ids_reads_only_the_named_nodes_in_request_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::new(dir.path().join("grapha.db"));
+        let node = |id: &str, name: &str| Node {
+            id: id.to_string(),
+            kind: NodeKind::Function,
+            name: name.to_string(),
+            file: "lib.rs".into(),
+            span: Span {
+                start: [3, 4],
+                end: [9, 1],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::from([("async".to_string(), "true".to_string())]),
+            role: None,
+            signature: Some(format!("fn {name}()")),
+            doc_comment: Some(format!("Docs for {name}.")),
+            module: Some("core".to_string()),
+            snippet: Some("{ }".to_string()),
+            repo: Some("app".to_string()),
+        };
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                node("lib.rs::a", "a"),
+                node("lib.rs::b", "b"),
+                node("lib.rs::c", "c"),
+            ],
+            edges: Vec::new(),
+        };
+        store.save(&graph).unwrap();
+
+        let loaded = store
+            .load_nodes_by_ids_read_only(&["lib.rs::c", "lib.rs::missing", "lib.rs::a"])
+            .unwrap();
+
+        assert_eq!(loaded, vec![graph.nodes[2].clone(), graph.nodes[0].clone()]);
     }
 
     #[test]

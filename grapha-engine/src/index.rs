@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use grapha_core::graph::Graph;
+use grapha_core::graph::{Graph, Node};
 use serde::Serialize;
 use tantivy::Index;
 
@@ -100,6 +100,14 @@ impl GraphaSearchIndexHandle {
         options: &SearchOptions,
     ) -> anyhow::Result<Vec<SearchResult>> {
         search::search_filtered(&self.search_index, query, limit, options)
+    }
+
+    /// Read the full [`Node`] records for `ids` (request order, missing ids
+    /// skipped) from the store's SQLite graph by point lookup, so a caller can
+    /// turn search hits into spans, signatures and docs without loading the
+    /// whole graph the way [`GraphaIndexHandle`] does.
+    pub fn nodes_by_ids(&self, ids: &[&str]) -> anyhow::Result<Vec<Node>> {
+        SqliteStore::new(self.store_dir.join("grapha.db")).load_nodes_by_ids_read_only(ids)
     }
 }
 

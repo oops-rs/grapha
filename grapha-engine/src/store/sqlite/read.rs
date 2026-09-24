@@ -101,6 +101,39 @@ pub(super) fn load_nodes(
     Ok(nodes)
 }
 
+/// Load just the nodes named by `ids`, in request order, skipping ids the
+/// store does not hold. Each id is a point lookup on the unique `idx_nodes_id`
+/// index, so the cost scales with `ids.len()`, not with the graph.
+pub(super) fn load_nodes_by_ids_read_only(
+    store: &SqliteStore,
+    ids: &[&str],
+) -> anyhow::Result<Vec<Node>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = store.open_read_only()?;
+    let schema_version = schema::schema_version(&conn)?;
+    let repo_expr = if schema_version.as_deref() == Some(schema::STORE_SCHEMA_VERSION) {
+        "repo"
+    } else {
+        "NULL"
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, kind, name, file,
+                span_start_line, span_start_col, span_end_line, span_end_col,
+                visibility, metadata, role, signature, doc_comment, module, snippet, {repo_expr}
+         FROM nodes WHERE id = ?1",
+    ))?;
+    let mut nodes = Vec::with_capacity(ids.len());
+    for id in ids {
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            nodes.push(decode_node_row(row)?);
+        }
+    }
+    Ok(nodes)
+}
+
 pub(super) fn build_edge_where(edge_kinds: Option<&[EdgeKind]>) -> (String, Vec<&'static str>) {
     let Some(edge_kinds) = edge_kinds.filter(|kinds| !kinds.is_empty()) else {
         return (String::new(), Vec::new());
