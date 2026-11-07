@@ -2,8 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
-use crate::store::Store;
-use crate::{index_status, mcp, recall, search, store, watch};
+use crate::{index_status, mcp, recall, watch};
 
 use super::index::{load_graph, open_search_index};
 
@@ -38,18 +37,9 @@ pub(crate) fn handle_mcp(
 ) -> anyhow::Result<()> {
     let options = resolve_mcp_options(&path, watch_mode);
     let store_path = path.join(".grapha");
-    let state = match build_initial_state(&path, &store_path, verbose) {
-        Ok(state) => state,
-        Err(error) => {
-            if verbose {
-                eprintln!(
-                    "mcp: no usable index at {} ({error}); will auto-index on first tool call",
-                    store_path.display()
-                );
-            }
-            empty_state_for_lazy_index(path.clone(), store_path.clone())
-        }
-    };
+    // A client may initialize many workspace MCPs without ever querying them.
+    // Do not materialize a graph until the first tool call.
+    let state = empty_state_for_lazy_index(path.clone(), store_path.clone());
 
     if options.watch {
         run_mcp_with_watch(path, state, verbose)
@@ -58,7 +48,7 @@ pub(crate) fn handle_mcp(
     }
 }
 
-fn build_initial_state(
+pub(crate) fn build_initial_state(
     path: &std::path::Path,
     store_path: &std::path::Path,
     verbose: bool,
@@ -117,85 +107,16 @@ fn run_mcp_with_watch(
 ) -> anyhow::Result<()> {
     let (rx, _guard) =
         watch::start_watcher(&path, &["swift", "rs", "ts", "tsx", "js", "jsx", "vue"])?;
-    let store_path = path.join(".grapha");
-    let project_path = path.clone();
-
-    let (state_tx, state_rx) = std::sync::mpsc::channel::<(
-        grapha_core::graph::Graph,
-        tantivy::Index,
-        grapha_engine::index_status::IndexFreshness,
-    )>();
-
+    // Watch events invalidate the graph; extraction waits until a tool call.
+    // Idle clients must not build/retain workspace-sized snapshots in parallel.
+    let (state_tx, state_rx) = std::sync::mpsc::sync_channel::<()>(1);
     std::thread::Builder::new()
-        .name("grapha-watch-reindex".into())
+        .name("grapha-watch-invalidate".into())
         .spawn(move || {
-            for event in rx {
-                match event {
-                    watch::WatchEvent::FilesChanged(files) => {
-                        if verbose {
-                            eprintln!("watch: {} file(s) changed, re-indexing...", files.len());
-                        }
-                        if let Err(e) = std::fs::create_dir_all(&store_path) {
-                            eprintln!(
-                                "watch: failed to create store dir {}: {e}",
-                                store_path.display()
-                            );
-                            continue;
-                        }
-                        match crate::app::pipeline::run_pipeline(
-                            &project_path,
-                            verbose,
-                            false,
-                            None,
-                        ) {
-                            Ok(output) => {
-                                let graph = output.graph;
-                                let store_file = store_path.join("grapha.db");
-                                let store = store::sqlite::SqliteStore::new(store_file);
-                                if let Err(e) = store.save(&graph) {
-                                    eprintln!("watch: failed to save graph: {e}");
-                                    continue;
-                                }
-                                let search_path = store_path.join("search_index");
-                                match search::build_index(&graph, &search_path) {
-                                    Ok(index) => {
-                                        if let Err(e) = index_status::save_index_status(
-                                            &project_path,
-                                            &store_path,
-                                            graph.nodes.len(),
-                                            graph.edges.len(),
-                                            &crate::config::load_config(&project_path),
-                                        ) {
-                                            eprintln!("watch: failed to save index status: {e}");
-                                            continue;
-                                        }
-                                        let Some(freshness) =
-                                            index_status::capture_index_freshness(
-                                                &project_path,
-                                                &store_path,
-                                            )
-                                            .ok()
-                                        else {
-                                            eprintln!("watch: failed to capture index freshness");
-                                            continue;
-                                        };
-                                        if state_tx.send((graph, index, freshness)).is_err() {
-                                            break;
-                                        }
-                                        if verbose {
-                                            eprintln!("watch: re-index complete");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("watch: failed to build search index: {e}");
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("watch: re-index failed: {e}");
-                            }
-                        }
-                    }
+            for _event in rx {
+                match state_tx.try_send(()) {
+                    Ok(()) | Err(std::sync::mpsc::TrySendError::Full(())) => {}
+                    Err(std::sync::mpsc::TrySendError::Disconnected(())) => break,
                 }
             }
         })?;

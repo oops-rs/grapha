@@ -286,6 +286,8 @@ Available MCP tools:
 | `remove_concept` | Remove a concept from the project concept store |
 | `reload` | Reload graph data from disk without restarting the server |
 
+MCP startup and tool discovery do not load the graph. The first tool call loads the existing index (or builds one if missing). After 60 seconds without a tool call, the server releases the graph and search index; the next call reloads them while preserving session recall. With `--watch`, source changes are coalesced and indexing runs on the next tool call, so idle clients do not build or queue graph snapshots. Active queries still need memory proportional to the indexed workspace; prefer a project root over a directory containing many repositories.
+
 The MCP server remembers symbol resolutions within a session. If `helper` is ambiguous, disambiguating once with `File.swift::helper` lets later bare `helper` queries resolve to the same symbol. Use `reload` after a manual `grapha index .` when the server is not running with `--watch`.
 
 ## Configuration

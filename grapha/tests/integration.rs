@@ -1410,7 +1410,7 @@ fn repo_smells_populates_graph_and_query_caches() {
         .assert()
         .success();
 
-    let graph_cache_path = store_dir.join("graph.bincode");
+    let graph_cache_path = store_dir.join("graph-v2.bincode");
     let query_cache_path = store_dir.join("query_cache.bin");
     assert!(!graph_cache_path.exists());
     assert!(!query_cache_path.exists());
@@ -1448,7 +1448,7 @@ fn repo_smells_no_cache_bypasses_graph_and_query_caches() {
         .assert()
         .success();
 
-    let graph_cache_path = store_dir.join("graph.bincode");
+    let graph_cache_path = store_dir.join("graph-v2.bincode");
     let query_cache_path = store_dir.join("query_cache.bin");
     assert!(!graph_cache_path.exists());
     assert!(!query_cache_path.exists());

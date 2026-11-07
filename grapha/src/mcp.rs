@@ -8,115 +8,135 @@ use serde_json::json;
 use handler::McpState;
 use types::{JsonRpcRequest, JsonRpcResponse};
 
-/// Run MCP server with a watch channel that hot-swaps the graph on file changes.
-pub fn run_mcp_server_with_watch(
-    mut state: McpState,
-    watch_rx: std::sync::mpsc::Receiver<(
-        grapha_core::graph::Graph,
-        tantivy::Index,
-        grapha_engine::index_status::IndexFreshness,
-    )>,
-    verbose: bool,
-) -> anyhow::Result<()> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+/// A loaded graph is a cache, not session state. Keep recall across eviction,
+/// and reload the persisted snapshot on the next tool call.
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-    // Set stdin to non-blocking-ish: use lines() but poll watch_rx between requests
-    for line in stdin.lock().lines() {
-        // Check for graph updates from watcher (non-blocking)
-        while let Ok((graph, index, freshness)) = watch_rx.try_recv() {
-            let node_count = graph.nodes.len();
-            let edge_count = graph.edges.len();
-            state.graph = graph;
-            state.search_index = index;
-            state.freshness = Some(freshness);
-
-            let valid_ids: std::collections::HashSet<&str> =
-                state.graph.nodes.iter().map(|n| n.id.as_str()).collect();
-            state.recall.prune(&valid_ids);
-
-            if verbose {
-                eprintln!("watch: graph updated ({node_count} nodes, {edge_count} edges)");
-            }
-        }
-
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("mcp: failed to read stdin: {e}");
-                break;
-            }
-        };
-
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let request: JsonRpcRequest = match serde_json::from_str(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = JsonRpcResponse::error(
-                    serde_json::Value::Null,
-                    -32700,
-                    format!("parse error: {e}"),
-                );
-                write_response(&mut stdout, &resp)?;
-                continue;
-            }
-        };
-
-        let id = match request.id {
-            Some(id) => id,
-            None => continue,
-        };
-
-        let response = dispatch(&mut state, id, &request.method, &request.params);
-        write_response(&mut stdout, &response)?;
+fn evict_index(state: &mut McpState) {
+    if state.needs_index {
+        return;
     }
-
-    Ok(())
+    state.graph = grapha_core::graph::Graph::new();
+    state.search_index = tantivy::Index::create_in_ram(tantivy::schema::Schema::builder().build());
+    state.freshness = None;
+    state.needs_index = true;
 }
 
-pub fn run_mcp_server(mut state: McpState) -> anyhow::Result<()> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+/// Watch notifications carry no graph; source changes are coalesced until queried.
+pub fn run_mcp_server_with_watch(
+    state: McpState,
+    watch_rx: std::sync::mpsc::Receiver<()>,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    run_server(state, Some(watch_rx), verbose)
+}
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("mcp: failed to read stdin: {e}");
+pub fn run_mcp_server(state: McpState) -> anyhow::Result<()> {
+    run_server(state, None, false)
+}
+
+fn run_server(
+    mut state: McpState,
+    watch_rx: Option<std::sync::mpsc::Receiver<()>>,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    // A bounded input queue lets the state owner evict an idle graph even while
+    // stdin is blocked, without letting a fast client queue unlimited requests.
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("grapha-mcp-stdin".into())
+        .spawn(move || {
+            for line in io::stdin().lock().lines() {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        })?;
+    serve_requests(
+        &mut state,
+        watch_rx,
+        rx,
+        &mut io::stdout(),
+        IDLE_TIMEOUT,
+        verbose,
+    )
+}
+
+fn serve_requests(
+    state: &mut McpState,
+    watch_rx: Option<std::sync::mpsc::Receiver<()>>,
+    rx: std::sync::mpsc::Receiver<io::Result<String>>,
+    stdout: &mut impl Write,
+    idle_timeout: std::time::Duration,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    let mut last_tool_call = std::time::Instant::now();
+    let mut needs_reindex = false;
+    loop {
+        if !state.needs_index && last_tool_call.elapsed() >= idle_timeout {
+            evict_index(state);
+        }
+        let timeout = if state.needs_index {
+            idle_timeout
+        } else {
+            idle_timeout.saturating_sub(last_tool_call.elapsed())
+        };
+        let line = match rx.recv_timeout(timeout) {
+            Ok(Ok(line)) => line,
+            Ok(Err(error)) => {
+                eprintln!("mcp: failed to read stdin: {error}");
                 break;
             }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                evict_index(state);
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
-
+        if let Some(updates) = watch_rx.as_ref() {
+            let mut changed = false;
+            while updates.try_recv().is_ok() {
+                changed = true;
+            }
+            if changed {
+                needs_reindex = true;
+                evict_index(state);
+                if verbose {
+                    eprintln!("watch: sources changed; will reindex on next tool call");
+                }
+            }
+        }
         if line.trim().is_empty() {
             continue;
         }
-
         let request: JsonRpcRequest = match serde_json::from_str(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = JsonRpcResponse::error(
-                    serde_json::Value::Null,
-                    -32700,
-                    format!("parse error: {e}"),
-                );
-                write_response(&mut stdout, &resp)?;
+            Ok(request) => request,
+            Err(error) => {
+                write_response(
+                    stdout,
+                    &JsonRpcResponse::error(
+                        serde_json::Value::Null,
+                        -32700,
+                        format!("parse error: {error}"),
+                    ),
+                )?;
                 continue;
             }
         };
-
-        // Notifications have no id -- skip without responding
-        let id = match request.id {
-            Some(id) => id,
-            None => continue,
-        };
-
-        let response = dispatch(&mut state, id, &request.method, &request.params);
-        write_response(&mut stdout, &response)?;
+        let Some(id) = request.id else { continue };
+        if request.method == "tools/call" && needs_reindex {
+            if let Err(error) = handler::rebuild_index(state) {
+                write_response(stdout, &JsonRpcResponse::success(id, error))?;
+                continue;
+            }
+            needs_reindex = false;
+        }
+        let response = dispatch(state, id, &request.method, &request.params);
+        if request.method == "tools/call" {
+            last_tool_call = std::time::Instant::now();
+        }
+        write_response(stdout, &response)?;
     }
-
     Ok(())
 }
 
@@ -153,7 +173,7 @@ fn dispatch(
     }
 }
 
-fn write_response(stdout: &mut io::Stdout, response: &JsonRpcResponse) -> anyhow::Result<()> {
+fn write_response(stdout: &mut impl Write, response: &JsonRpcResponse) -> anyhow::Result<()> {
     let json = serde_json::to_string(response)?;
     stdout.write_all(json.as_bytes())?;
     stdout.write_all(b"\n")?;
@@ -187,6 +207,127 @@ mod tests {
             needs_index: false,
             freshness: None,
         }
+    }
+
+    #[test]
+    fn idle_eviction_reloads_persisted_graph_without_reindexing() {
+        use crate::store::Store;
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join(".grapha");
+        std::fs::create_dir_all(&store_path).unwrap();
+        let graph = Graph {
+            version: "persisted-test".into(),
+            nodes: vec![],
+            edges: vec![],
+        };
+        crate::store::sqlite::SqliteStore::new(store_path.join("grapha.db"))
+            .save(&graph)
+            .unwrap();
+        let mut state = make_test_state();
+        state.project_root = dir.path().into();
+        state.store_path = store_path;
+
+        evict_index(&mut state);
+        assert!(state.needs_index);
+        assert!(state.freshness.is_none());
+        handler::ensure_indexed(&mut state).unwrap();
+        assert_eq!(state.graph, graph);
+        assert!(!state.needs_index);
+        assert_eq!(
+            crate::store::sqlite::SqliteStore::new(state.store_path.join("grapha.db"))
+                .load()
+                .unwrap(),
+            graph
+        );
+
+        evict_index(&mut state);
+        evict_index(&mut state);
+        handler::ensure_indexed(&mut state).unwrap();
+        assert_eq!(state.graph, graph);
+    }
+
+    #[test]
+    fn initialization_and_tool_listing_leave_graph_unloaded() {
+        let mut state = make_test_state();
+        evict_index(&mut state);
+        for method in ["initialize", "tools/list"] {
+            assert!(
+                dispatch(&mut state, json!(1), method, &json!({}))
+                    .error
+                    .is_none()
+            );
+            assert!(state.needs_index);
+            assert!(state.graph.nodes.is_empty());
+        }
+    }
+
+    #[test]
+    fn idle_timer_runs_without_input_and_ignores_initialization_traffic() {
+        let mut state = make_test_state();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sender = std::thread::spawn(move || {
+            // Keep stdin connected while the idle timer fires.
+            for _ in 0..5 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                tx.send(Ok(
+                    json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}).to_string(),
+                ))
+                .unwrap();
+            }
+        });
+        let mut output = Vec::new();
+        serve_requests(
+            &mut state,
+            None,
+            rx,
+            &mut output,
+            std::time::Duration::from_millis(5),
+            false,
+        )
+        .unwrap();
+        sender.join().unwrap();
+        assert!(state.needs_index);
+        assert_eq!(String::from_utf8(output).unwrap().lines().count(), 5);
+    }
+
+    #[test]
+    fn watch_changes_are_coalesced_and_rebuilt_on_tool_call() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn changed_symbol() {}\n").unwrap();
+        let mut state = make_test_state();
+        state.project_root = dir.path().into();
+        state.store_path = dir.path().join(".grapha");
+        let (watch_tx, watch_rx) = std::sync::mpsc::sync_channel(1);
+        watch_tx.try_send(()).unwrap();
+        for _ in 0..1000 {
+            assert!(matches!(
+                watch_tx.try_send(()),
+                Err(std::sync::mpsc::TrySendError::Full(()))
+            ));
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Ok(
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "get_file_map", "arguments": {}
+            }})
+            .to_string(),
+        ))
+        .unwrap();
+        drop(tx);
+        let mut output = Vec::new();
+        serve_requests(
+            &mut state,
+            Some(watch_rx),
+            rx,
+            &mut output,
+            IDLE_TIMEOUT,
+            false,
+        )
+        .unwrap();
+        assert!(!state.needs_index, "{}", String::from_utf8_lossy(&output));
+        assert!(state.graph.nodes.iter().any(|n| n.name == "changed_symbol"));
+        let response: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_ne!(response["result"]["isError"], true);
     }
 
     #[test]

@@ -19,16 +19,201 @@ pub fn cache_is_fresh(source_path: &Path, cache_path: &Path) -> bool {
     }
 }
 
+// The public graph uses JSON-specific serde attributes (omitted optional fields
+// and internally tagged roles). Those are not a positional binary wire format.
+// Explicit tuples preserve every field without cloning the graph or buffering
+// the entire file. The header rejects legacy caches before allocating a graph.
+const GRAPH_CACHE_MAGIC: &[u8; 8] = b"GRAPHA02";
+
+#[derive(Serialize, Deserialize)]
+enum BinaryRole {
+    EntryPoint,
+    Terminal(grapha_core::graph::TerminalKind),
+    Internal,
+}
+
+impl From<&grapha_core::graph::NodeRole> for BinaryRole {
+    fn from(role: &grapha_core::graph::NodeRole) -> Self {
+        match role {
+            grapha_core::graph::NodeRole::EntryPoint => Self::EntryPoint,
+            grapha_core::graph::NodeRole::Terminal { kind } => Self::Terminal(*kind),
+            grapha_core::graph::NodeRole::Internal => Self::Internal,
+        }
+    }
+}
+
+impl From<BinaryRole> for grapha_core::graph::NodeRole {
+    fn from(role: BinaryRole) -> Self {
+        match role {
+            BinaryRole::EntryPoint => Self::EntryPoint,
+            BinaryRole::Terminal(kind) => Self::Terminal { kind },
+            BinaryRole::Internal => Self::Internal,
+        }
+    }
+}
+
+type BinaryNode = (
+    String,
+    grapha_core::graph::NodeKind,
+    String,
+    PathBuf,
+    grapha_core::graph::Span,
+    grapha_core::graph::Visibility,
+    HashMap<String, String>,
+    Option<BinaryRole>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+type BinaryEdge = (
+    String,
+    String,
+    grapha_core::graph::EdgeKind,
+    f64,
+    Option<grapha_core::graph::FlowDirection>,
+    Option<String>,
+    Option<String>,
+    Option<bool>,
+    Vec<grapha_core::graph::EdgeProvenance>,
+    Option<String>,
+);
+
+fn read_binary_graph(reader: &mut impl std::io::Read) -> anyhow::Result<Graph> {
+    use grapha_core::graph::{Edge, Node};
+    let mut magic = [0; 8];
+    reader.read_exact(&mut magic)?;
+    anyhow::ensure!(&magic == GRAPH_CACHE_MAGIC, "obsolete graph cache format");
+    let config = bincode::config::standard();
+    let version = bincode::serde::decode_from_std_read(reader, config)?;
+    let node_count: usize = bincode::serde::decode_from_std_read(reader, config)?;
+    let mut nodes = Vec::new();
+    for _ in 0..node_count {
+        let (
+            id,
+            kind,
+            name,
+            file,
+            span,
+            visibility,
+            metadata,
+            role,
+            signature,
+            doc_comment,
+            module,
+            snippet,
+            repo,
+        ): BinaryNode = bincode::serde::decode_from_std_read(reader, config)?;
+        nodes.push(Node {
+            id,
+            kind,
+            name,
+            file,
+            span,
+            visibility,
+            metadata,
+            role: role.map(Into::into),
+            signature,
+            doc_comment,
+            module,
+            snippet,
+            repo,
+        });
+    }
+    let edge_count: usize = bincode::serde::decode_from_std_read(reader, config)?;
+    let mut edges = Vec::new();
+    for _ in 0..edge_count {
+        let (
+            source,
+            target,
+            kind,
+            confidence,
+            direction,
+            operation,
+            condition,
+            async_boundary,
+            provenance,
+            repo,
+        ): BinaryEdge = bincode::serde::decode_from_std_read(reader, config)?;
+        edges.push(Edge {
+            source,
+            target,
+            kind,
+            confidence,
+            direction,
+            operation,
+            condition,
+            async_boundary,
+            provenance,
+            repo,
+        });
+    }
+    Ok(Graph {
+        version,
+        nodes,
+        edges,
+    })
+}
+
+fn write_binary_graph(graph: &Graph, writer: &mut impl std::io::Write) -> anyhow::Result<()> {
+    writer.write_all(GRAPH_CACHE_MAGIC)?;
+    let config = bincode::config::standard();
+    bincode::serde::encode_into_std_write(&graph.version, writer, config)?;
+    bincode::serde::encode_into_std_write(graph.nodes.len(), writer, config)?;
+    for node in &graph.nodes {
+        bincode::serde::encode_into_std_write(
+            (
+                &node.id,
+                node.kind,
+                &node.name,
+                &node.file,
+                &node.span,
+                node.visibility,
+                &node.metadata,
+                node.role.as_ref().map(BinaryRole::from),
+                &node.signature,
+                &node.doc_comment,
+                &node.module,
+                &node.snippet,
+                &node.repo,
+            ),
+            writer,
+            config,
+        )?;
+    }
+    bincode::serde::encode_into_std_write(graph.edges.len(), writer, config)?;
+    for edge in &graph.edges {
+        bincode::serde::encode_into_std_write(
+            (
+                &edge.source,
+                &edge.target,
+                edge.kind,
+                edge.confidence,
+                &edge.direction,
+                &edge.operation,
+                &edge.condition,
+                edge.async_boundary,
+                &edge.provenance,
+                &edge.repo,
+            ),
+            writer,
+            config,
+        )?;
+    }
+    Ok(())
+}
+
 /// Binary (bincode) cache for a [`Graph`] stored alongside the SQLite database.
 pub struct GraphCache {
     cache_path: PathBuf,
 }
 
 impl GraphCache {
-    /// The cache file lives at `store_dir/graph.bincode`.
+    /// The cache file lives at `store_dir/graph-v2.bincode`.
     pub fn new(store_dir: &Path) -> Self {
         Self {
-            cache_path: store_dir.join("graph.bincode"),
+            cache_path: store_dir.join("graph-v2.bincode"),
         }
     }
 
@@ -39,10 +224,10 @@ impl GraphCache {
 
     /// Deserialise a [`Graph`] from the binary cache file.
     pub fn load(&self) -> anyhow::Result<Graph> {
-        let bytes = fs::read(&self.cache_path)
+        let file = fs::File::open(&self.cache_path)
             .with_context(|| format!("reading cache file {}", self.cache_path.display()))?;
-        let graph: Graph = bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-            .map(|(graph, _)| graph)
+        let mut reader = std::io::BufReader::new(file);
+        let graph = read_binary_graph(&mut reader)
             .with_context(|| format!("deserialising cache file {}", self.cache_path.display()))?;
         Ok(graph)
     }
@@ -53,9 +238,11 @@ impl GraphCache {
         if let Some(parent) = self.cache_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let bytes = bincode::serde::encode_to_vec(graph, bincode::config::standard())
-            .with_context(|| "serialising graph to bincode".to_string())?;
-        fs::write(&self.cache_path, bytes)
+        let file = fs::File::create(&self.cache_path)
+            .with_context(|| format!("creating cache file {}", self.cache_path.display()))?;
+        let mut writer = std::io::BufWriter::new(file);
+        write_binary_graph(graph, &mut writer).context("serialising graph to bincode")?;
+        std::io::Write::flush(&mut writer)
             .with_context(|| format!("writing cache file {}", self.cache_path.display()))?;
         Ok(())
     }
@@ -356,6 +543,71 @@ mod tests {
 
         let loaded = gc.load().unwrap();
         assert_eq!(loaded, original);
+    }
+
+    #[test]
+    fn graph_cache_round_trips_populated_graph_and_rejects_legacy_format() {
+        use grapha_core::graph::{
+            Edge, EdgeKind, EdgeProvenance, FlowDirection, NodeRole, TerminalKind,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cache = GraphCache::new(dir.path());
+        let mut graph = Graph::new();
+        graph.nodes = sample_extraction_result("src/main.rs").nodes;
+        // Include both absent and present fields and both internally tagged roles.
+        let mut terminal = graph.nodes[0].clone();
+        terminal.id = "terminal".into();
+        terminal.role = Some(NodeRole::Terminal {
+            kind: TerminalKind::Network,
+        });
+        terminal.signature = Some("fn terminal()".into());
+        terminal.doc_comment = Some("docs".into());
+        terminal.repo = Some("repo".into());
+        terminal.metadata.insert("key".into(), "value".into());
+        graph.nodes[0].role = Some(NodeRole::EntryPoint);
+        graph.nodes.push(terminal);
+        let mut internal = graph.nodes[0].clone();
+        internal.id = "internal".into();
+        internal.role = Some(NodeRole::Internal);
+        graph.nodes.push(internal);
+        graph.edges.push(Edge {
+            source: graph.nodes[0].id.clone(),
+            target: "terminal".into(),
+            kind: EdgeKind::Calls,
+            confidence: 0.9,
+            direction: Some(FlowDirection::Write),
+            operation: Some("send".into()),
+            condition: Some("ready".into()),
+            async_boundary: Some(true),
+            provenance: vec![EdgeProvenance {
+                file: "src/main.rs".into(),
+                span: graph.nodes[0].span.clone(),
+                symbol_id: graph.nodes[0].id.clone(),
+            }],
+            repo: Some("repo".into()),
+        });
+        let legacy_bytes =
+            bincode::serde::encode_to_vec(&graph, bincode::config::standard()).unwrap();
+        fs::write(&cache.cache_path, legacy_bytes).unwrap();
+        assert!(
+            cache
+                .load()
+                .unwrap_err()
+                .to_string()
+                .contains("deserialising")
+        );
+        cache.save(&graph).unwrap();
+        assert_eq!(cache.load().unwrap(), graph);
+        // Empty optional fields must also occupy their binary positions.
+        graph.nodes[0].role = None;
+        graph.edges[0].direction = None;
+        graph.edges[0].operation = None;
+        graph.edges[0].condition = None;
+        graph.edges[0].async_boundary = None;
+        graph.edges[0].provenance.clear();
+        graph.edges[0].repo = None;
+        cache.save(&graph).unwrap();
+        assert_eq!(cache.load().unwrap(), graph);
     }
 
     #[test]

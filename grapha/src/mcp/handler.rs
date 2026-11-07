@@ -19,10 +19,8 @@ pub struct McpState {
     pub project_root: PathBuf,
     pub store_path: PathBuf,
     pub recall: Recall,
-    /// When true, the graph/search index have not been built yet and the
-    /// next tool call should trigger a full index pipeline run before
-    /// dispatching. Set when the MCP server is started against a project
-    /// that has no `.grapha` directory.
+    /// The graph is unloaded. Load the persisted index on demand, or build it
+    /// if none exists. Set at startup and after idle eviction/invalidation.
     pub needs_index: bool,
     /// Freshness snapshot captured with the currently loaded graph.
     pub freshness: Option<IndexFreshness>,
@@ -74,9 +72,8 @@ pub(crate) fn build_initial_index(
 }
 
 /// Ensure `state` has a populated graph and search index. When the server
-/// was started without a `.grapha` directory the graph and search index are
-/// placeholders; the first tool call triggers a full pipeline run here so
-/// callers see real results instead of an empty graph (or a startup error).
+/// is started or evicted after idling, load the persisted graph on demand.
+/// Only a project without an index needs a full extraction pipeline run.
 ///
 /// Returns `Err(tool_error_value)` if indexing fails so the caller can
 /// surface the failure as a normal tool error without crashing the server.
@@ -85,6 +82,25 @@ pub(crate) fn ensure_indexed(state: &mut McpState) -> Result<(), Value> {
         return Ok(());
     }
 
+    if state.store_path.join("grapha.db").exists() {
+        let loaded =
+            crate::app::mcp::build_initial_state(&state.project_root, &state.store_path, false)
+                .map_err(|error| tool_error(format!("failed to load index: {error}")))?;
+        state.graph = loaded.graph;
+        state.search_index = loaded.search_index;
+        state.freshness = loaded.freshness;
+        state.needs_index = false;
+        let valid_ids = state.graph.nodes.iter().map(|n| n.id.as_str()).collect();
+        state.recall.prune(&valid_ids);
+        return Ok(());
+    }
+
+    rebuild_index(state)
+}
+
+/// Rebuild once on demand after coalesced source changes. Failed rebuilds leave
+/// the caller's invalidation pending so the next tool call retries.
+pub(crate) fn rebuild_index(state: &mut McpState) -> Result<(), Value> {
     match build_initial_index(&state.project_root) {
         Ok((graph, search_index)) => {
             state.graph = graph;
