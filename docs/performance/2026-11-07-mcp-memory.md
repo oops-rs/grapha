@@ -11,7 +11,7 @@ The original startup eagerly loaded the complete graph. Watch mode also ran extr
 - Initialization and tool discovery require no graph. Load an existing index on the first tool call; only extract when an index is missing or watch changes require rebuilding.
 - A graph is a discardable cache. Evict graph/search state after 60 seconds without a tool call, including when stdin is blocked or non-tool messages keep arriving. Preserve session recall and prune stale symbol IDs after loading.
 - Watching an idle project requires no extraction. Coalesce source changes into a capacity-one notification; rebuild once when the next tool call needs the results. Retain invalidation after a failed rebuild so the next call retries.
-- Binary serialization must preserve every node and edge field. Use explicit positional records and an untagged binary role representation, streamed through buffered readers/writers. `graph-v2.bincode` and its magic header isolate the format from legacy clients and caches. Legacy cache files are left untouched.
+- Binary serialization must preserve every node and edge field. Use explicit positional records and a binary role enum, streamed through buffered readers/writers. `graph-v2.bincode` and its magic header isolate the format from legacy clients and caches. Legacy cache files are left untouched.
 
 Active queries still materialize the whole graph. Memory therefore scales with workspace size during a query. Loading a large graph again after eviction costs latency; this change prioritizes releasing idle memory without dropping graph data or query results.
 

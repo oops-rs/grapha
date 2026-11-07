@@ -857,7 +857,7 @@ pub fn search_filtered(
             continue;
         }
         let module_val = get_str(fields.module);
-        let repo_val = fields.repo.map(&get_str).unwrap_or_default();
+        let repo_val = fields.repo.map(get_str).unwrap_or_default();
         let role_val = get_str(fields.role);
         let result = SearchResult {
             id: get_str(fields.id),

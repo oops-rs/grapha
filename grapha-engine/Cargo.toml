@@ -1,6 +1,6 @@
 [package]
 name = "grapha-engine"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 description = "Library engine for Grapha code intelligence"
 license = "MIT"
@@ -11,8 +11,8 @@ keywords = ["code-intelligence", "graph", "analysis", "search", "query"]
 categories = ["development-tools"]
 
 [dependencies]
-grapha-core = { version = "0.5.1", path = "../grapha-core" }
-grapha-swift = { version = "0.5.1", path = "../grapha-swift", optional = true }
+grapha-core = { version = "0.5.2", path = "../grapha-core" }
+grapha-swift = { version = "0.5.2", path = "../grapha-swift", optional = true }
 anyhow = "1"
 bincode = { version = "2", features = ["serde"] }
 blake3 = { version = "1", default-features = false, features = ["std"] }
